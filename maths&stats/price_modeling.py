@@ -36,10 +36,10 @@ for idx, ts in enumerate(all_timestamps):
     close_price = open_price + rand.uniform(-6, 6)
     high = max(open_price, close_price) + rand.uniform(1.5, 4.5)
     low = min(open_price, close_price) - rand.uniform(1.5, 4.5)
-    if low < 80:
-        low = 80
-    if high > 130:
-        high = 130
+    #if low < 80:
+    #    low = 80
+    #if high > 130:
+    #    high = 130
 
     row = {
         "Open": round(open_price, 2),
@@ -74,3 +74,27 @@ mpf.plot(
 )
 
 print(f"\nSaved chart to: {chart_file}")
+
+df = pd.read_csv(filename)
+
+
+def desmos_points(column_name):
+    points = ", ".join(
+        f"({index}, {value:.2f})"
+        for index, value in enumerate(df[column_name])
+    )
+    return f"[{points}]"
+
+
+data_given = input("What data do you want? ").strip().lower()
+print()
+if data_given == "open":
+    print(desmos_points("Open"))
+elif data_given == "high":
+    print(desmos_points("High"))
+elif data_given == "low":
+    print(desmos_points("Low"))
+elif data_given == "close":
+    print(desmos_points("Close"))
+else:
+    print(f"Unknown data type: {data_given}. Choose open, high, low, or close.")
