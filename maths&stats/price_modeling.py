@@ -18,8 +18,8 @@ folder_name = os.path.join(master_dir, "processor")
 os.makedirs(folder_name, exist_ok=True)
 filename = os.path.join(folder_name, "generated_data.csv")
 chart_file = os.path.join(folder_name, "stock_chart.png")
-
-rand.seed(rand.randint(-1000000,1000000))
+seed=rand.randint(-1000000,1000000)
+rand.seed(seed)
 start_day = pd.Timestamp("2026-09-14")
 all_timestamps = []
 for offset in range(5):
@@ -28,17 +28,23 @@ for offset in range(5):
         all_timestamps.append(pd.Timestamp(day.date()) + pd.Timedelta(hours=hour))
 
 rows = []
+max_1
+max_1
+max_1
+max_1
 prev_close = 100.0
+#Looking at gpbusd the ratio between (O-C)/(H-L) ranges from (2-3)% to 100%, so close price should reflect this
+#try making % change over 5 days between (5-23)% in both ways
 for idx, ts in enumerate(all_timestamps):
+    k = rand.randint(1,70)/4
     open_price = prev_close
-    close_price = open_price + rand.uniform(-6, 6)
-    high = max(open_price, close_price) + rand.uniform(1.5, 4.5)
-    low = min(open_price, close_price) - rand.uniform(1.5, 4.5)
-    #if low < 80:
-    #    low = 80
-    #if high > 130:
-    #    high = 130
-
+    close_price = open_price + rand.uniform(-k, k)
+    high = max(open_price, close_price) + rand.gauss(mu=0.3, sigma=0.1*rand.randint(10,23) )
+    low = min(open_price, close_price) -  rand.gauss(mu=0.3, sigma=0.1*rand.randint(10,23) )
+        
+        
+        
+    
     row = {
         "Open": round(open_price, 2),
         "High": round(high, 2),
@@ -83,7 +89,7 @@ def desmos_points(column_name):
     )
     return f"[{points}]"
 
-
+print(f"Seed is {seed}")
 data_given = input("What data do you want? ").strip().lower()
 print()
 if data_given == "open":
