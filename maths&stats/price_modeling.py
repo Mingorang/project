@@ -12,8 +12,6 @@ import os
     #and the .png for visual needs such as ratio of bullish/bearish candles in a timeframe and other measures to make an index of market conditions.
 #Add a for loop and a much larger csv file so the AI bot/script has access to data over a larger timeframe
 #If necessary change conditions as it is currently random and unaffected by market manipulation of large firms.
-
-
 # Simulate OHLC stock data for a candle chart like the example image.
 master_dir = os.path.dirname(os.path.abspath(__file__))
 folder_name = os.path.join(master_dir, "processor")
