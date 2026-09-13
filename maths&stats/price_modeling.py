@@ -12,14 +12,16 @@ import os
     #and the .png for visual needs such as ratio of bullish/bearish candles in a timeframe and other measures to make an index of market conditions.
 #Add a for loop and a much larger csv file so the AI bot/script has access to data over a larger timeframe
 #If necessary change conditions as it is currently random and unaffected by market manipulation of large firms.
+
+
 # Simulate OHLC stock data for a candle chart like the example image.
 master_dir = os.path.dirname(os.path.abspath(__file__))
 folder_name = os.path.join(master_dir, "processor")
 os.makedirs(folder_name, exist_ok=True)
 filename = os.path.join(folder_name, "generated_data.csv")
 chart_file = os.path.join(folder_name, "stock_chart.png")
-seed=rand.randint(-1000000,1000000)
-rand.seed(seed)
+
+rand.seed(rand.randint(-1000000,1000000))
 start_day = pd.Timestamp("2026-09-14")
 all_timestamps = []
 for offset in range(5):
@@ -28,23 +30,21 @@ for offset in range(5):
         all_timestamps.append(pd.Timestamp(day.date()) + pd.Timedelta(hours=hour))
 
 rows = []
-max_1
-max_1
-max_1
-max_1
 prev_close = 100.0
-#Looking at gpbusd the ratio between (O-C)/(H-L) ranges from (2-3)% to 100%, so close price should reflect this
-#try making % change over 5 days between (5-23)% in both ways
+#Scales from 1 to 100
+vol_index = 92
 for idx, ts in enumerate(all_timestamps):
-    k = rand.randint(1,70)/4
     open_price = prev_close
-    close_price = open_price + rand.uniform(-k, k)
-    high = max(open_price, close_price) + rand.gauss(mu=0.3, sigma=0.1*rand.randint(10,23) )
-    low = min(open_price, close_price) -  rand.gauss(mu=0.3, sigma=0.1*rand.randint(10,23) )
-        
-        
-        
-    
+    close_price = open_price + (6/15)*(rand.uniform(-vol_index,vol_index))
+    high = max(open_price, close_price) + rand.uniform(1.5, 4.5)
+    low = min(open_price, close_price) - rand.uniform(1.5, 4.5)
+    #if low < (0.8*prev_close):
+    #    low = (0.8*prev_close)
+    #if high > (1.4*prev_close):
+    #    high = (1.4*prev_close)
+    if prev_close <= 0:
+        low = 0
+
     row = {
         "Open": round(open_price, 2),
         "High": round(high, 2),
@@ -66,10 +66,24 @@ daily.to_csv(filename)
 print("\nCandlestick table:")
 print(daily.head(12).to_string())
 
+black_background_style = mpf.make_mpf_style(
+    base_mpf_style="charles",
+    figcolor="black",
+    facecolor="black",
+    y_on_right=True,
+    rc={
+        "axes.labelcolor": "white",
+        "axes.titlecolor": "white",
+        "text.color": "white",
+        "xtick.color": "white",
+        "ytick.color": "white",
+    },
+)
+
 mpf.plot(
     daily,
     type="candle",
-    style="charles",
+    style=black_background_style,
     volume=False,
     figsize=(12, 6),
     ylabel="Price",
@@ -89,7 +103,7 @@ def desmos_points(column_name):
     )
     return f"[{points}]"
 
-print(f"Seed is {seed}")
+
 data_given = input("What data do you want? ").strip().lower()
 print()
 if data_given == "open":
