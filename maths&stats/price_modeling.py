@@ -32,7 +32,7 @@ for offset in range(5):
 rows = []
 prev_close = 100.0
 #Scales from 1 to 100
-vol_index = 92
+vol_index = 100
 for idx, ts in enumerate(all_timestamps):
     open_price = prev_close
     close_price = open_price + (6/15)*(rand.uniform(-vol_index,vol_index))
@@ -42,8 +42,11 @@ for idx, ts in enumerate(all_timestamps):
     #    low = (0.8*prev_close)
     #if high > (1.4*prev_close):
     #    high = (1.4*prev_close)
-    if prev_close <= 0:
+    if prev_close < 0:
         low = 0
+        close_price = 0
+        high = 0
+
 
     row = {
         "Open": round(open_price, 2),

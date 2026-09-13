@@ -1,7 +1,7 @@
 Ideas for how "processor" handles data:
   Randomised python generated data:
     - Takes the High and Low of each candle, creates a new x-axis (no new y-axis) and creates a Taylor Series for the points, not sure what this does but does something.
-    -   
+    - something with rate of change 
   
   Real live data that would/could have market manipulation:
   - Compare to the python generated data as the bot will learn from the python data, so for whatever is being watched, an volatility tracker must be made, so it doesnt trade FX the same was as oil
