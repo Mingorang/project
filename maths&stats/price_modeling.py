@@ -5,6 +5,7 @@ import matplotlib
 matplotlib.use("Agg")
 import mplfinance as mpf
 import os
+from math import log
 
 #Very cool, should learn R for data analysis to do something with this data
 
@@ -31,16 +32,16 @@ for offset in range(5):
 
 rows = []
 prev_close = 100.0
-#Scales from 1 to 100
-vol_index = 99
+#Scales from 1 to 100, .05% --> 50+%, log scale necessary
+vol_index = 1
 if vol_index >= 100 or vol_index < 0:
     print("Not a good index.")
     exit()
 for idx, ts in enumerate(all_timestamps):
     open_price = prev_close
     close_price = open_price + (6/15)*(rand.uniform(-vol_index,vol_index))
-    high = max(open_price, close_price) * rand.uniform(1, (100 + (vol_index/20))/100)
-    low = min(open_price, close_price)  * rand.uniform((100-(vol_index/5))/100, 1)
+    high = max(open_price, close_price) * rand.uniform(1, 1+log(vol_index,1.000921458)/100000000)
+    low = min(open_price, close_price)  * rand.uniform(1-log(vol_index,1.000921458)/200000, 1)
     #if low < (0.8*prev_close):
     #    low = (0.8*prev_close)
     #if high > (1.4*prev_close):
@@ -86,7 +87,14 @@ black_background_style = mpf.make_mpf_style(
     },
 )
 
-mpf.plot(
+lowest_low = daily["Low"].min()
+open_01 = daily["Open"].iloc[0]
+close_01 = daily["Close"].iloc[-1]
+highest_high = daily["High"].max()
+percent_change = (highest_high - lowest_low) / lowest_low * 100
+market_change = (close_01 - open_01) / open_01 * 100
+
+figure, axes = mpf.plot(
     daily,
     type="candle",
     style=black_background_style,
@@ -94,8 +102,17 @@ mpf.plot(
     figsize=(12, 6),
     ylabel="Price",
     title="Stock Price (9am-5pm, 5 Days)",
-    savefig=chart_file,
+    returnfig=True,
 )
+
+axes[0].legend(
+    [
+        f"Low to high: {percent_change:.2f}%",
+        f"Monday open to Friday close: {market_change:.2f}%",
+    ],
+    loc="upper left",
+)
+figure.savefig(chart_file, facecolor=figure.get_facecolor())
 
 print(f"\nSaved chart to: {chart_file}")
 
