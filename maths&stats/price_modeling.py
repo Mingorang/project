@@ -32,12 +32,15 @@ for offset in range(5):
 rows = []
 prev_close = 100.0
 #Scales from 1 to 100
-vol_index = 100
+vol_index = 99
+if vol_index >= 100 or vol_index < 0:
+    print("Not a good index.")
+    exit()
 for idx, ts in enumerate(all_timestamps):
     open_price = prev_close
     close_price = open_price + (6/15)*(rand.uniform(-vol_index,vol_index))
-    high = max(open_price, close_price) + rand.uniform(1.5, 4.5)
-    low = min(open_price, close_price) - rand.uniform(1.5, 4.5)
+    high = max(open_price, close_price) * rand.uniform(1, (100 + (vol_index/20))/100)
+    low = min(open_price, close_price)  * rand.uniform((100-(vol_index/5))/100, 1)
     #if low < (0.8*prev_close):
     #    low = (0.8*prev_close)
     #if high > (1.4*prev_close):
