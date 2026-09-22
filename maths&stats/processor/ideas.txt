@@ -1,7 +1,7 @@
 Ideas for how "processor" handles data:
   Randomised python generated data:
-    - Takes the High and Low of each candle, creates a new x-axis (no new y-axis) and creates a Taylor Series for the points, not sure what this does but does something.
-    - something with rate of change 
+    - Takes the High and Low of each candle, creates a new x-axis (no new y-axis) and creates a Taylor Series for the 4 ONLY points, not sure what this does but does something.
+    - something with   discrete rate of change (open only) 
   
   Real live data that would/could have market manipulation:
   - Compare to the python generated data as the bot will learn from the python data, so for whatever is being watched, an volatility tracker must be made, so it doesnt trade FX the same was as oil
@@ -11,4 +11,6 @@ Ideas for how "processor" handles data:
 
 Both types of data should have:
   - Takes the High and Low of each candle, creates a new x-axis (no new y-axis) and creates a Taylor Series for the points, not sure what this does but does something.
-   - Volatility index made by measuring price movement over a day and repeat over many days (?) 
+  - Volatility index made by measuring price movement over a day and repeat over many days (?)  ✅
+  - When completed, both bots will be given plots from the csv & png, and take analysis from 2 diferent approaches. (random seed will be stored for R and ML)
+  - Currently making the R data analysis one, and this should be compared to a machine learning algorithm with test reseults, since aseed is chosen, we can compare accuracy as both the ml and statistical analysis bots wont have direct access to chart when testing in the future when both projects are complete

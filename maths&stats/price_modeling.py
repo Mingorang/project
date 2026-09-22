@@ -41,10 +41,9 @@ if vol_index >100 or vol_index < 0 or vol_index % 1:
     exit()
 for idx, ts in enumerate(all_timestamps):
     open_price = prev_close
-    close_price = open_price + (3/10)*(rand.uniform(-vol_index,vol_index))
-    intraday_range = log(vol_index, 1.000921458) / 100000
-    high = max(open_price, close_price) * rand.uniform(1, 1 + intraday_range)
-    low = min(open_price, close_price) * rand.uniform(1 - intraday_range, 1)
+    close_price = open_price + (6/15)*(rand.uniform(-vol_index,vol_index))
+    high = max(open_price, close_price) * rand.uniform(1, 1+log(vol_index,1.000921458)/100000000)
+    low = min(open_price, close_price)  * rand.uniform(1-log(vol_index,1.000921458)/200000, 1)
     #if low < (0.8*prev_close):
     #    low = (0.8*prev_close)
     #if high > (1.4*prev_close):
