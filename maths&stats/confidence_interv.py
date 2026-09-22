@@ -23,9 +23,8 @@ if __name__ == "__main__":
     data = data_randomiser(10)
     print(data)
 
-    population_size = int(1e8)
-    bootstrapped_data = bootstrap(data, population_size)
-    print(f"There were {len(bootstrapped_data)} bootstrapped samples generated!")
+    simulation_size = 100_000
+    bootstrapped_data = bootstrap(data, simulation_size)
     tests = int(input("number of tests: "))
     actual_mean = bootstrapped_data.mean()
     print(f"Actual mean: {actual_mean:<12.4f}")
@@ -57,8 +56,6 @@ if __name__ == "__main__":
     plt.axvline(actual_mean, color="black", linewidth=1.5,
                 label=f"actual mean = {actual_mean:.2f}")
     plt.xlim(0, rangel)
-    plt.title(f"Bootstrapped population (n={population_size:,}) "
-              f"with {tests} sample means")
     plt.xlabel("value")
     plt.ylabel("frequency")
     plt.legend()

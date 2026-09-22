@@ -3,6 +3,7 @@ import time
 import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
+from matplotlib.lines import Line2D
 import mplfinance as mpf
 import os
 from math import log
@@ -31,32 +32,29 @@ for offset in range(5):
         all_timestamps.append(pd.Timestamp(day.date()) + pd.Timedelta(hours=hour))
 
 rows = []
-prev_close = 100.0
+prev_close = 100
 #Scales from 1 to 100, .05% --> 50+%, log scale necessary
-vol_index = 1
-if vol_index >= 100 or vol_index < 0:
+question = int(input("Volativity of market: "))
+vol_index = question
+if vol_index >100 or vol_index < 0 or vol_index % 1:
     print("Not a good index.")
     exit()
 for idx, ts in enumerate(all_timestamps):
     open_price = prev_close
-    close_price = open_price + (6/15)*(rand.uniform(-vol_index,vol_index))
-    high = max(open_price, close_price) * rand.uniform(1, 1+log(vol_index,1.000921458)/1000000000000)
-    low = min(open_price, close_price)  * rand.uniform(1-log(vol_index,1.000921458)/10000000000, 1)
+    close_price = open_price + (3/10)*(rand.uniform(-vol_index,vol_index))
+    intraday_range = log(vol_index, 1.000921458) / 100000
+    high = max(open_price, close_price) * rand.uniform(1, 1 + intraday_range)
+    low = min(open_price, close_price) * rand.uniform(1 - intraday_range, 1)
     #if low < (0.8*prev_close):
     #    low = (0.8*prev_close)
     #if high > (1.4*prev_close):
     #    high = (1.4*prev_close)
-    if prev_close < 0:
-        low = 0
-        close_price = 0
-        high = 0
-
 
     row = {
-        "Open": round(open_price, 2),
-        "High": round(high, 2),
-        "Low": round(low, 2),
-        "Close": round(close_price, 2),
+        "Open": round(open_price, 4),
+        "High": round(high, 4),
+        "Low": round(low, 4),
+        "Close": round(close_price, 4),
     }
     rows.append((ts, row))
     prev_close = close_price
@@ -91,7 +89,9 @@ lowest_low = daily["Low"].min()
 open_01 = daily["Open"].iloc[0]
 close_01 = daily["Close"].iloc[-1]
 highest_high = daily["High"].max()
-percent_change = (highest_high - lowest_low) / lowest_low * 100
+percent_change = abs((highest_high - lowest_low) / lowest_low * 100)
+if lowest_low <= 0: 
+    percent_change = "N/A"
 market_change = (close_01 - open_01) / open_01 * 100
 
 figure, axes = mpf.plot(
@@ -105,12 +105,18 @@ figure, axes = mpf.plot(
     returnfig=True,
 )
 
-axes[0].legend(
-    [
+legend = axes[0].legend(
+    handles=[
+        Line2D([], [], linestyle="None", color="none"),
+        Line2D([], [], linestyle="None", color="none"),
+    ],
+    labels=[
         f"Low to high: {percent_change:.2f}%",
         f"Monday open to Friday close: {market_change:.2f}%",
     ],
     loc="upper left",
+    handlelength=0,
+    handletextpad=0,
 )
 figure.savefig(chart_file, facecolor=figure.get_facecolor())
 
