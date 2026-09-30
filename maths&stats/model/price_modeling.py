@@ -7,7 +7,6 @@ import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 import mplfinance as mpf
 import os
-from math import log
 
 #Very cool, should learn R for data analysis to do something with this data
 
@@ -29,6 +28,17 @@ question = int(input("Volativity of market: "))
 vol_index = question
 if vol_index > 100 or vol_index < 1:
     print("Choose a volatility index from 1 to 100.")
+    exit()
+
+price_mode = input(
+    "Price behavior: [1] allow negative futures prices or [2] floor prices at zero? "
+).strip().lower()
+if price_mode in ("1", "futures"):
+    allow_negative = True
+elif price_mode in ("2", "floor"):
+    allow_negative = False
+else:
+    print("Choose 1 for negative-capable futures or 2 to enforce a zero floor.")
     exit()
 
 plot_mode = input("Create [1] one plot or [M] many plots? ").strip().lower()
@@ -60,8 +70,14 @@ def generate_daily():
     for ts in all_timestamps:
         open_price = prev_close
         close_price = open_price + (6/15)*(rand.uniform(-vol_index,vol_index))
-        high = max(open_price, close_price) * rand.uniform(1, 1+log(vol_index,1.000921458)/100000000)
-        low = min(open_price, close_price) * rand.uniform(1-log(vol_index,1.000921458)/200000, 1)
+        if not allow_negative:
+            close_price = max(0.0, close_price)
+
+        wick_range = max(vol_index / 40, 0.025)
+        high = max(open_price, close_price) + rand.uniform(0, wick_range)
+        low = min(open_price, close_price) - rand.uniform(0, wick_range)
+        if not allow_negative:
+            low = max(0.0, low)
 
         row = {
             "Open": round(open_price, 4),
@@ -102,15 +118,16 @@ for run_number in range(1, run_count + 1):
     daily = generate_daily()
     csv_file = os.path.join(results_dir, f"data_{run_number}.csv")
     image_file = os.path.join(results_dir, f"image_{run_number}.png")
-    daily.to_csv(csv_file)
 
     lowest_low = daily["Low"].min()
     open_01 = daily["Open"].iloc[0]
     close_01 = daily["Close"].iloc[-1]
     highest_high = daily["High"].max()
-    percent_change = abs((highest_high - lowest_low) / lowest_low * 100)
     if lowest_low <= 0:
-        percent_change = "N/A"
+        low_to_high_label = "Low to high: N/A"
+    else:
+        percent_change = abs((highest_high - lowest_low) / lowest_low * 100)
+        low_to_high_label = f"Low to high: {percent_change:.2f}%"
     market_change = (close_01 - open_01) / open_01 * 100
 
     figure, axes = mpf.plot(
@@ -130,7 +147,7 @@ for run_number in range(1, run_count + 1):
             Line2D([], [], linestyle="None", color="none"),
         ],
         labels=[
-            f"Low to high: {percent_change:.2f}%",
+            low_to_high_label,
             f"Monday open to Friday close: {market_change:.2f}%",
         ],
         loc="upper left",
@@ -139,6 +156,7 @@ for run_number in range(1, run_count + 1):
     )
     figure.savefig(image_file, facecolor=figure.get_facecolor())
     plt.close(figure)
+    daily.to_csv(csv_file)
 
     print(f"\nSaved chart to: {image_file}")
     print(f"Saved data to: {csv_file}")
