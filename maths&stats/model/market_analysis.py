@@ -228,7 +228,6 @@ def _draw_chart(frame: pd.DataFrame, run_id: int, best_long: Trade | None, best_
                           color="#7aa6d8", alpha=.22, label="95% t interval: 12-close mean")
     price_ax.fill_between(x, frame.bb_lower_20_2sd.to_numpy(dtype=float), frame.bb_upper_20_2sd.to_numpy(dtype=float),
                           color="#aeb7c2", alpha=.13, label="Bollinger 20 +/- 2 SD")
-    price_ax.axhline(0, color="#777777", linewidth=.6, linestyle=":")
     opens: list[float] = frame["Open"].astype(float).tolist()
     highs: list[float] = frame["High"].astype(float).tolist()
     lows: list[float] = frame["Low"].astype(float).tolist()
