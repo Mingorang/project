@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
+from typing import Any
 
 import matplotlib
 matplotlib.use("Agg")
@@ -17,6 +18,7 @@ SLOW = 12
 CONFIDENCE = 0.95
 T_CRITICAL_DF11 = 2.200985160082949
 TARGET_R = 2.0
+Trade = dict[str, Any]
 
 
 def _ema(values: pd.Series, span: int) -> pd.Series:
@@ -75,29 +77,33 @@ def _add_indicators(frame: pd.DataFrame, run_id: int) -> pd.DataFrame:
     return frame
 
 
-def _trade_from_signal(frame: pd.DataFrame, signal_index: int, side: str, run_id: int) -> dict | None:
+def _trade_from_signal(frame: pd.DataFrame, signal_index: int, side: str, run_id: int) -> Trade | None:
     entry_index = signal_index + 1
     if entry_index >= len(frame):
         return None
-    entry = float(frame.loc[entry_index, "Open"])
-    stop = float(frame.loc[signal_index, "Low" if side == "Long" else "High"])
+    opens: list[float] = frame["Open"].astype(float).tolist()
+    highs: list[float] = frame["High"].astype(float).tolist()
+    lows: list[float] = frame["Low"].astype(float).tolist()
+    closes: list[float] = frame["Close"].astype(float).tolist()
+    entry = float(opens[entry_index])
+    stop = float(lows[signal_index] if side == "Long" else highs[signal_index])
     risk = entry - stop if side == "Long" else stop - entry
     if not np.isfinite(risk) or risk <= 0:
         return None
     target = entry + TARGET_R * risk if side == "Long" else entry - TARGET_R * risk
     exit_index = len(frame) - 1
-    exit_price = float(frame.loc[exit_index, "Close"])
+    exit_price = float(closes[exit_index])
     reason = "time_exit"
     for index in range(entry_index, len(frame)):
-        opening = float(frame.loc[index, "Open"])
+        opening = float(opens[index])
         if (side == "Long" and opening <= stop) or (side == "Short" and opening >= stop):
             exit_index, exit_price, reason = index, opening, "stop_gap"
             break
         if (side == "Long" and opening >= target) or (side == "Short" and opening <= target):
             exit_index, exit_price, reason = index, opening, "target_gap"
             break
-        stop_hit = frame.loc[index, "Low"] <= stop if side == "Long" else frame.loc[index, "High"] >= stop
-        target_hit = frame.loc[index, "High"] >= target if side == "Long" else frame.loc[index, "Low"] <= target
+        stop_hit = lows[index] <= stop if side == "Long" else highs[index] >= stop
+        target_hit = highs[index] >= target if side == "Long" else lows[index] <= target
         if stop_hit:
             exit_index, exit_price, reason = index, stop, "stop"
             break
@@ -116,7 +122,7 @@ def _trade_from_signal(frame: pd.DataFrame, signal_index: int, side: str, run_id
     }
 
 
-def _trades_for_run(frame: pd.DataFrame, run_id: int) -> list[dict]:
+def _trades_for_run(frame: pd.DataFrame, run_id: int) -> list[Trade]:
     difference = frame["fast_sma_5"] - frame["slow_sma_12"]
     trades = []
     for index in range(1, len(frame)):
@@ -136,12 +142,12 @@ def _stat(values: pd.Series, function) -> float:
     return float(function(values)) if len(values) else np.nan
 
 
-def _best(trades: list[dict], side: str) -> dict | None:
+def _best(trades: list[Trade], side: str) -> Trade | None:
     choices = [trade for trade in trades if trade["side"] == side]
     return max(choices, key=lambda trade: trade["r_multiple"], default=None)
 
 
-def _metrics(frame: pd.DataFrame, trades: list[dict], run_id: int, source_png: str) -> dict:
+def _metrics(frame: pd.DataFrame, trades: list[Trade], run_id: int, source_png: str) -> tuple[dict[str, Any], Trade | None, Trade | None]:
     close = frame["Close"]
     changes = frame["bar_change"].dropna()
     returns = frame["bar_return_pct"].dropna() / 100
@@ -205,28 +211,39 @@ def _metrics(frame: pd.DataFrame, trades: list[dict], run_id: int, source_png: s
     return result, best_long, best_short
 
 
-def _draw_chart(frame: pd.DataFrame, run_id: int, best_long: dict | None, best_short: dict | None, output: Path, guide_path: Path) -> None:
-    x = frame.bar.to_numpy()
+def _draw_chart(frame: pd.DataFrame, run_id: int, best_long: Trade | None, best_short: Trade | None, output: Path, guide_path: Path) -> None:
+    x = frame["bar"].astype(int).tolist()
     figure, axes = plt.subplots(3, 1, figsize=(13, 9), sharex=True,
-                                gridspec_kw={"height_ratios": [4.2, 1.2, 1.2]}, facecolor="white")
+                                gridspec_kw={"height_ratios": [4.2, 1.2, 1.2]}, facecolor="black")
     price_ax, rsi_ax, macd_ax = axes
+    for axis in axes:
+        axis.set_facecolor("black")
+        axis.tick_params(colors="white")
+        for spine in axis.spines.values():
+            spine.set_color("#aab2bd")
+
+    price_ax.yaxis.tick_right()
+    price_ax.yaxis.set_label_position("right")
     price_ax.fill_between(x, frame.ci95_lower_12.to_numpy(dtype=float), frame.ci95_upper_12.to_numpy(dtype=float),
                           color="#7aa6d8", alpha=.22, label="95% t interval: 12-close mean")
     price_ax.fill_between(x, frame.bb_lower_20_2sd.to_numpy(dtype=float), frame.bb_upper_20_2sd.to_numpy(dtype=float),
                           color="#aeb7c2", alpha=.13, label="Bollinger 20 +/- 2 SD")
     price_ax.axhline(0, color="#777777", linewidth=.6, linestyle=":")
-    for index, row in frame.iterrows():
-        xpos = index + 1
-        color = "#16846b" if row.Close >= row.Open else "#d94c5c"
-        price_ax.vlines(xpos, row.Low, row.High, color="#30343b", linewidth=.55, zorder=2)
-        body_low = min(row.Open, row.Close)
-        body_height = max(abs(row.Close - row.Open), .012)
+    opens: list[float] = frame["Open"].astype(float).tolist()
+    highs: list[float] = frame["High"].astype(float).tolist()
+    lows: list[float] = frame["Low"].astype(float).tolist()
+    closes: list[float] = frame["Close"].astype(float).tolist()
+    for xpos, (open_price, high, low, close) in enumerate(zip(opens, highs, lows, closes), start=1):
+        color = "#21d6a2" if close >= open_price else "#ff6b77"
+        price_ax.vlines(xpos, low, high, color="#d7dde5", linewidth=.65, zorder=2)
+        body_low = min(open_price, close)
+        body_height = max(abs(close - open_price), .012)
         price_ax.add_patch(Rectangle((xpos-.30, body_low), .60, body_height, facecolor=color,
-                                     edgecolor="#30343b", linewidth=.3, zorder=3))
-    price_ax.plot(x, frame.fast_sma_5, color="#1769aa", linewidth=1.0, label="SMA 5")
-    price_ax.plot(x, frame.slow_sma_12, color="#d28b00", linewidth=1.1, label="SMA 12")
-    price_ax.plot(x, frame.bb_mid_20, color="#606b78", linewidth=.7, linestyle="--", label="BB mid 20")
-    for side, trade, color in (("Long", best_long, "#087f5b"), ("Short", best_short, "#c92a2a")):
+                                     edgecolor="#d7dde5", linewidth=.3, zorder=3))
+    price_ax.plot(x, frame.fast_sma_5, color="#66b6ff", linewidth=1.0, label="SMA 5")
+    price_ax.plot(x, frame.slow_sma_12, color="#ffc857", linewidth=1.1, label="SMA 12")
+    price_ax.plot(x, frame.bb_mid_20, color="#ccd4df", linewidth=.7, linestyle="--", label="BB mid 20")
+    for side, trade, color in (("Long", best_long, "#21d6a2"), ("Short", best_short, "#ff6b77")):
         if trade:
             price_ax.scatter(trade["entry_index"], trade["entry_price"], marker="^" if side == "Long" else "v",
                              color=color, s=48, zorder=5)
@@ -235,33 +252,35 @@ def _draw_chart(frame: pd.DataFrame, run_id: int, best_long: dict | None, best_s
             price_ax.scatter(trade["exit_index"], trade["exit_price"], marker="x", color=color, s=38, zorder=5)
             price_ax.annotate(f"{side[0]} out", (trade["exit_index"], trade["exit_price"]),
                               xytext=(4, -12), textcoords="offset points", fontsize=7, color=color)
-    price_ax.set_ylabel("Price")
-    price_ax.set_title(f"Run {run_id}: OHLC + SMA / Bollinger / 95% interval")
-    price_ax.legend(loc="upper left", fontsize=7, ncol=2, frameon=True)
-    price_ax.grid(True, color="#d8dde3", linewidth=.35)
+    price_ax.set_ylabel("Share price", color="white")
+    price_ax.set_title(f"Run {run_id}: OHLC + SMA / Bollinger / 95% interval", color="white")
+    price_ax.legend(loc="upper left", fontsize=7, ncol=2, facecolor="#111111", edgecolor="#aab2bd",
+                    labelcolor="white", framealpha=.9)
+    price_ax.grid(True, color="#3a414b", linewidth=.4)
 
-    rsi_ax.plot(x, frame.rsi_14, color="#7651a8", linewidth=.85)
-    rsi_ax.axhline(70, color="#b34848", linestyle="--", linewidth=.6)
-    rsi_ax.axhline(30, color="#348269", linestyle="--", linewidth=.6)
+    rsi_ax.plot(x, frame.rsi_14, color="#c4a7ff", linewidth=.85)
+    rsi_ax.axhline(70, color="#ff8585", linestyle="--", linewidth=.6)
+    rsi_ax.axhline(30, color="#58ddb4", linestyle="--", linewidth=.6)
     rsi_ax.set_ylim(0, 100)
-    rsi_ax.set_ylabel("RSI 14")
-    rsi_ax.set_xlabel("Study [4]: RSI guide in analysis_learning_resources.md")
-    rsi_ax.grid(True, color="#e2e5e9", linewidth=.35)
+    rsi_ax.set_ylabel("RSI 14", color="white")
+    rsi_ax.set_xlabel("Study [4]: RSI guide in analysis_learning_resources.md", color="white")
+    rsi_ax.grid(True, color="#3a414b", linewidth=.4)
 
     macd_ax.bar(x, frame.macd_histogram, color=np.where(frame.macd_histogram >= 0, "#16846b", "#d94c5c"), width=.65, alpha=.65)
-    macd_ax.plot(x, frame.macd_12_26, color="#1769aa", linewidth=.8, label="MACD 12-26")
-    macd_ax.plot(x, frame.macd_signal_9, color="#d28b00", linewidth=.8, label="Signal 9")
+    macd_ax.plot(x, frame.macd_12_26, color="#66b6ff", linewidth=.8, label="MACD 12-26")
+    macd_ax.plot(x, frame.macd_signal_9, color="#ffc857", linewidth=.8, label="Signal 9")
     macd_ax.axhline(0, color="#777777", linewidth=.55)
-    macd_ax.set_ylabel("MACD")
-    macd_ax.set_xlabel("Study [5]: MACD guide in analysis_learning_resources.md")
-    macd_ax.legend(loc="upper left", fontsize=7, ncol=2)
-    macd_ax.grid(True, color="#e2e5e9", linewidth=.35)
+    macd_ax.set_ylabel("MACD", color="white")
+    macd_ax.set_xlabel("Study [5]: MACD guide in analysis_learning_resources.md", color="white")
+    macd_ax.legend(loc="upper left", fontsize=7, ncol=2, facecolor="#3D1A1A", edgecolor="#aab2bd",
+                   labelcolor="white", framealpha=.9)
+    macd_ax.grid(True, color="#3a414b", linewidth=.4)
     dates = pd.to_datetime(frame.Date).dt.date
     ticks = np.flatnonzero(dates.ne(dates.shift()).to_numpy())
     macd_ax.set_xticks(ticks + 1, [pd.Timestamp(dates.iloc[i]).strftime("%a %d %b") for i in ticks], rotation=25, ha="right")
-    figure.text(.01, .005, f"Study links [1]-[11]: {guide_path.name}. PNG labels are references; open the companion Markdown for clickable URLs. Best crossovers are hindsight only; no fees/slippage.", fontsize=7, color="#333333")
+    figure.text(.01, .005, f"Study links [1]-[11]: {guide_path.name}. PNG labels are references; open the companion Markdown for clickable URLs. Best crossovers are hindsight only; no fees/slippage.", fontsize=7, color="white")
     figure.tight_layout(rect=(0, .035, 1, 1))
-    figure.savefig(output, dpi=135, facecolor="white", bbox_inches="tight")
+    figure.savefig(output, dpi=135, facecolor="black", bbox_inches="tight")
     plt.close(figure)
 
 
@@ -279,23 +298,31 @@ def _contact_sheet(items: list[tuple[int, Path]], output: Path, columns: int = 8
     sheet.save(output)
 
 
-def _overall_metrics(summary: pd.DataFrame, bars: pd.DataFrame, trades: list[dict]) -> pd.DataFrame:
-    high_row = bars.loc[bars.High.idxmax()]
-    low_row = bars.loc[bars.Low.idxmin()]
-    best_long = max((trade for trade in trades if trade["side"] == "Long"), key=lambda item: item["r_multiple"], default=None)
-    best_short = max((trade for trade in trades if trade["side"] == "Short"), key=lambda item: item["r_multiple"], default=None)
+def _overall_metrics(summary: pd.DataFrame, bars: pd.DataFrame, trades: list[Trade]) -> pd.DataFrame:
+    high_values: list[float] = bars["High"].astype(float).tolist()
+    low_values: list[float] = bars["Low"].astype(float).tolist()
+    run_values: list[int] = bars["run"].astype(int).tolist()
+    date_values: list[Any] = bars["Date"].tolist()
+    high_index = high_values.index(max(high_values))
+    low_index = low_values.index(min(low_values))
+    highest_volatility_values: list[float] = summary["realized_vol_per_bar_pct"].astype(float).tolist()
+    summary_run_values: list[int] = summary["run"].astype(int).tolist()
+    valid_volatility_indices = [index for index, value in enumerate(highest_volatility_values) if np.isfinite(value)]
+    highest_volatility_index = max(valid_volatility_indices, key=highest_volatility_values.__getitem__, default=None)
+    best_long = _best(trades, "Long")
+    best_short = _best(trades, "Short")
     returns = summary.total_return_pct.dropna()
     values = [
         ("run_pairs", len(summary), "count"), ("ohlc_bars", len(bars), "count"),
         ("invalid_ohlc_rows", int(((bars.High < bars[["Open", "Close"]].max(axis=1)) | (bars.Low > bars[["Open", "Close"]].min(axis=1))).sum()), "count"),
-        ("highest_high", float(high_row.High), f"run {int(high_row.run)} at {high_row.Date}"),
-        ("lowest_low", float(low_row.Low), f"run {int(low_row.run)} at {low_row.Date}"),
+        ("highest_high", high_values[high_index], f"run {run_values[high_index]} at {date_values[high_index]}"),
+        ("lowest_low", low_values[low_index], f"run {run_values[low_index]} at {date_values[low_index]}"),
         ("average_run_return_pct", _stat(returns, np.mean), "percent, positive-price simple close/open"),
         ("median_run_return_pct", _stat(returns, np.median), "percent, positive-price simple close/open"),
         ("positive_return_runs", int((summary.total_return_pct > 0).sum()), "of runs"),
         ("negative_return_runs", int((summary.total_return_pct < 0).sum()), "of runs"),
         ("median_realized_volatility_per_bar_pct", _stat(summary.realized_vol_per_bar_pct, np.median), "percent, unannualized"),
-        ("highest_volatility_run", int(summary.loc[summary.realized_vol_per_bar_pct.idxmax(), "run"]), "run id"),
+        ("highest_volatility_run", summary_run_values[highest_volatility_index] if highest_volatility_index is not None else np.nan, "run id"),
         ("median_high_low_range_points", _stat(summary.high_low_range_points, np.median), "price points"),
         ("mean_bullish_candle_share_pct", _stat(summary.bullish_candle_pct, np.mean), "percent"),
         ("mean_bearish_candle_share_pct", _stat(summary.bearish_candle_pct, np.mean), "percent"),
