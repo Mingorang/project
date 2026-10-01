@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 import mplfinance as mpf
 import os
+from market_analysis import analyze_looped_results
 
 #Very cool, should learn R for data analysis to do something with this data
 
@@ -19,7 +20,15 @@ import os
 # Simulate OHLC stock data for a candle chart like the example image.
 master_dir = os.path.dirname(os.path.abspath(__file__))
 results_dir = os.path.join(master_dir, "looped_results")
-os.makedirs(results_dir, exist_ok=True)
+if not os.path.isdir(results_dir):
+    print(f"Output folder does not exist: {results_dir}")
+    print("Create the folder manually before generating data.")
+    exit()
+analysis_dir = os.path.join(master_dir, "looped_results_analysis_300")
+if not os.path.isdir(analysis_dir):
+    print(f"Analysis output folder does not exist: {analysis_dir}")
+    print("Create the folder manually before generating data.")
+    exit()
 
 rand.seed(rand.randint(-1000000,1000000))
 start_day = pd.Timestamp("2026-09-14")
@@ -160,6 +169,12 @@ for run_number in range(1, run_count + 1):
 
     print(f"\nSaved chart to: {image_file}")
     print(f"Saved data to: {csv_file}")
+
+analysis_result = analyze_looped_results(results_dir, analysis_dir)
+print(
+    f"\nAnalysis complete: {analysis_result['runs']} pairs, "
+    f"{analysis_result['bars']} bars, {analysis_result['trades']} crossover trades."
+)
 
 df = daily
 

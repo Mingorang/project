@@ -1,0 +1,39 @@
+Analysis of 300 synthetic OHLC runs
+=====================================
+
+Input: 300 matched CSV/PNG pairs; 13500 bars.
+Indicators: SMA(5,12); rolling 95% t-interval for the mean of the prior 12 closes; Bollinger(20,2 SD); RSI(14, Wilder); MACD(12,26,9); ATR(14, Wilder).
+Trade screen: 5/12 SMA crossover; entry at next bar open; stop at signal-bar low/high; target 2R; if stop and target both touch in one candle, stop is assumed first. No fees, slippage, or position sizing. Best trade is selected retrospectively from future outcomes and is not a recommendation or predictive signal.
+Returns and return-based ratios are only calculated for positive prior closes; ratio results are descriptive per-bar values, unannualized, with zero risk-free rate. A 95% rolling t-interval describes the recent 12-close mean and is not a forecast; serial correlation may weaken nominal coverage.
+No volume column is present, so volume-weighted or volume-confirmed indicators such as VWAP/OBV are omitted.
+
+run_pairs: 300 (count)
+ohlc_bars: 13500 (count)
+unpaired_csv: 0 (count)
+unpaired_png: 0 (count)
+invalid_ohlc_rows: 0 (count)
+highest_high: 180.9574 (run 239 at 2026-09-18 14:00:00)
+lowest_low: 13.7502 (run 218 at 2026-09-18 09:00:00)
+average_run_return_pct: -0.4476146666666661 (percent; positive-price simple close/open)
+median_run_return_pct: 0.2155499999999977 (percent; positive-price simple close/open)
+positive_return_runs: 151 (of 300)
+negative_return_runs: 149 (of 300)
+median_realized_volatility_per_bar_pct: 4.4799118093292885 (percent; no annualization)
+highest_volatility_run: 218 (run id)
+median_high_low_range_points: 41.05625 (price points)
+mean_bullish_candle_share_pct: 50.281481481481485 (percent of candles)
+mean_bearish_candle_share_pct: 49.718518518518515 (percent of candles)
+total_bullish_sma_crossovers: 453 (count)
+total_bearish_sma_crossovers: 458 (count)
+candidate_crossover_trades: 896 (count; next-bar open entries)
+best_long_r_multiple: 2.000000000000005 (run 237)
+best_short_r_multiple: 2.0 (run 8)
+runs_with_positive_best_long: 132 (of 300 with valid long setup)
+runs_with_positive_best_short: 130 (of 300 with valid short setup)
+mean_atr14_last: 4.278212066119874 (price points)
+mean_rsi14_last: 49.751005920072814 (0-100 scale)
+mean_macd_histogram_last: 0.013370168446969857 (price points)
+mean_bollinger_width_last_pct: 33.6417587417585 (percent)
+volume_indicators: nan (not available: input CSVs contain no Volume column)
+
+Per-run summary includes confidence_level=0.95.

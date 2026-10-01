@@ -1,3 +1,5 @@
 {
-    "python-envs.defaultEnvManager": "ms-python.python:system"
+    "python-envs.defaultEnvManager": "ms-python.python:system",
+    "chat.agent.maxRequests": 140000,
+    "chat.tools.autoApprove": true
 }
