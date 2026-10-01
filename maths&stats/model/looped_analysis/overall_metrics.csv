@@ -2,26 +2,26 @@ measure,value,context
 run_pairs,1,count
 ohlc_bars,45,count
 invalid_ohlc_rows,0,count
-highest_high,41.872458075,run 1 at 2026-09-15 13:00:00
-lowest_low,36.735729356,run 1 at 2026-09-18 12:00:00
-average_run_return_pct,-5.18784699999999,"percent, positive-price simple close/open"
-median_run_return_pct,-5.18784699999999,"percent, positive-price simple close/open"
+highest_high,103.382077019,run 1 at 2026-09-14 16:00:00
+lowest_low,97.032142411,run 1 at 2026-09-18 17:00:00
+average_run_return_pct,-1.685554401999989,"percent, positive-price simple close/open"
+median_run_return_pct,-1.685554401999989,"percent, positive-price simple close/open"
 positive_return_runs,0,of runs
 negative_return_runs,1,of runs
-median_realized_volatility_per_bar_pct,0.8621891288837497,"percent, unannualized"
+median_realized_volatility_per_bar_pct,0.6140858715315934,"percent, unannualized"
 highest_volatility_run,1,run id
-median_high_low_range_points,5.136728718999997,price points
-mean_bullish_candle_share_pct,42.22222222222222,percent
-mean_bearish_candle_share_pct,57.77777777777777,percent
+median_high_low_range_points,6.349934607999998,price points
+mean_bullish_candle_share_pct,51.11111111111111,percent
+mean_bearish_candle_share_pct,48.888888888888886,percent
 total_bullish_sma_crossovers,2,count
-total_bearish_sma_crossovers,1,count
-candidate_crossover_trades,3,count; next-bar open entries
+total_bearish_sma_crossovers,3,count
+candidate_crossover_trades,5,count; next-bar open entries
 best_long_r_multiple,-1.0,run 1
 best_short_r_multiple,2.0,run 1
 runs_with_positive_best_long,0,runs
 runs_with_positive_best_short,1,runs
-mean_atr14_last,0.9068466250089624,price points
-mean_rsi14_last,45.35865442515318,0-100 scale
-mean_macd_histogram_last,0.12669300067243539,price points
-mean_bollinger_width_last_pct,5.237638497991131,percent
+mean_atr14_last,1.1395818998374778,price points
+mean_rsi14_last,47.538303790588266,0-100 scale
+mean_macd_histogram_last,-0.006195919484358492,price points
+mean_bollinger_width_last_pct,2.905628322627588,percent
 volume_indicators,not available,input CSVs contain no Volume column

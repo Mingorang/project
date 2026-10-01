@@ -97,7 +97,7 @@ def generate_daily():
         if not allow_negative:
             close_price = max(0.0, close_price)
 
-        wick_range = abs((6/15) * (prev_close / 100) * vol_index)
+        wick_range = ((3.5/15) * (prev_close / 100) * vol_index)
         high = max(open_price, close_price) + rand.uniform(0, wick_range)
         low = min(open_price, close_price) - rand.uniform(0, wick_range)
         if not allow_negative:

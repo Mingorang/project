@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
-import shutil
 from typing import Any
 
 import matplotlib
@@ -349,7 +348,7 @@ def analyze_looped_results(source_dir: str | Path, output_dir: str | Path) -> di
         raise FileNotFoundError(f"Input folder does not exist: {source}")
     if not output.is_dir():
         raise FileNotFoundError(f"Analysis output folder does not exist (not creating it): {output}")
-    #guide_path = Path(__file__).with_name("analysis_learning_resources.md")
+    guide_path = Path(__file__).with_name("analysis_learning_resources.md")
     csv_paths = sorted(source.glob("data_*.csv"), key=lambda path: int(path.stem.split("_")[-1]))
     png_ids = {int(path.stem.split("_")[-1]) for path in source.glob("image_*.png")}
     csv_ids = {int(path.stem.split("_")[-1]) for path in csv_paths}
@@ -397,7 +396,6 @@ def analyze_looped_results(source_dir: str | Path, output_dir: str | Path) -> di
     _overall_metrics(summary, bars, all_trades).to_csv(output / "overall_metrics.csv", index=False)
     _contact_sheet([(run_id, source / f"image_{run_id}.png") for run_id in run_ids], output / "all_source_charts_contact_sheet.png")
     _contact_sheet(analysis_images, output / "all_analysis_charts_contact_sheet.png")
-    shutil.copy2(guide_path, output / guide_path.name)
     return {"runs": len(run_ids), "bars": len(bars), "trades": len(all_trades), "output_dir": str(output)}
 
 
