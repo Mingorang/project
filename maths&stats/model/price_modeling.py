@@ -18,6 +18,8 @@ from market_analysis import analyze_looped_results
 #If necessary change conditions as it is currently random and unaffected by market manipulation of large firms.
 
 # (Manually, no AI) change this for forex, take real-time , online data for some starting price of 2 currencies, (EUR/USD) and calculate each one seperately, and plot the difference, so the plot will show the Euro dvided by the USD for a more realistic simulation
+#Placing forex at volativity of 15-25 is reasonable over 5 days
+#Oil is reasonabl at 35 over 5 day
 starting_price = float(input("Starting price: "))
 
 # Simulate OHLC stock data for a candle chart like the example image.
@@ -27,7 +29,7 @@ if not os.path.isdir(results_dir):
     print(f"Output folder does not exist: {results_dir}")
     print("Create the folder manually before generating data.")
     exit()
-analysis_dir = os.path.join(master_dir, "looped_results_analysis_300")
+analysis_dir = os.path.join(master_dir, "looped_analysis")
 if not os.path.isdir(analysis_dir):
     print(f"Analysis output folder does not exist: {analysis_dir}")
     print("Create the folder manually before generating data.")
@@ -43,9 +45,9 @@ def clear_generated_files(directory, patterns):
 rand.seed(rand.randint(-1000000,1000000))
 start_day = pd.Timestamp("2026-09-14")
 #Scales from 1 to 100, .05% --> 50+%, log scale necessary
-question = int(input("Volativity of market: "))
-vol_index = question
-if vol_index > 100 or vol_index < 1:
+question = float(input("Volativity of market: "))
+vol_index = question/8
+if vol_index > 100 or vol_index < 0:
     print("Choose a volatility index from 1 to 100.")
     exit()
 
@@ -85,7 +87,7 @@ for offset in range(5):
     for hour in range(9, 18):
         all_timestamps.append(pd.Timestamp(day.date()) + pd.Timedelta(hours=hour))
 
-
+#This function need a lot of work for prices near 0 and high starting prices ones with small variance
 def generate_daily():
     rows = []
     prev_close = starting_price
@@ -95,17 +97,17 @@ def generate_daily():
         if not allow_negative:
             close_price = max(0.0, close_price)
 
-        wick_range = max(vol_index / 40, 0.025)*(prev_close/100)
+        wick_range = abs((6/15) * (prev_close / 100) * vol_index)
         high = max(open_price, close_price) + rand.uniform(0, wick_range)
         low = min(open_price, close_price) - rand.uniform(0, wick_range)
         if not allow_negative:
             low = max(0.0, low)
 
         row = {
-            "Open": round(open_price, 4),
-            "High": round(high, 4),
-            "Low": round(low, 4),
-            "Close": round(close_price, 4),
+            "Open": round(open_price, 9),
+            "High": round(high, 9),
+            "Low": round(low, 9),
+            "Close": round(close_price, 9),
         }
         rows.append((ts, row))
         prev_close = close_price

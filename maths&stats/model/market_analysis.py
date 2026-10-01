@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
+import shutil
 from typing import Any
 
 import matplotlib
@@ -262,7 +263,7 @@ def _draw_chart(frame: pd.DataFrame, run_id: int, best_long: Trade | None, best_
     rsi_ax.axhline(30, color="#58ddb4", linestyle="--", linewidth=.6)
     rsi_ax.set_ylim(0, 100)
     rsi_ax.set_ylabel("RSI 14", color="white")
-    rsi_ax.set_xlabel("Study [4]: RSI guide in analysis_learning_resources.md", color="white")
+   #rsi_ax.set_xlabel("Study [4]: RSI guide in analysis_learning_resources.md", color="white")
     rsi_ax.grid(True, color="#3a414b", linewidth=.4)
 
     macd_ax.bar(x, frame.macd_histogram, color=np.where(frame.macd_histogram >= 0, "#16846b", "#d94c5c"), width=.65, alpha=.65)
@@ -270,7 +271,7 @@ def _draw_chart(frame: pd.DataFrame, run_id: int, best_long: Trade | None, best_
     macd_ax.plot(x, frame.macd_signal_9, color="#ffc857", linewidth=.8, label="Signal 9")
     macd_ax.axhline(0, color="#777777", linewidth=.55)
     macd_ax.set_ylabel("MACD", color="white")
-    macd_ax.set_xlabel("Study [5]: MACD guide in analysis_learning_resources.md", color="white")
+    #macd_ax.set_xlabel("Study [5]: MACD guide in analysis_learning_resources.md", color="white")
     macd_ax.legend(loc="upper left", fontsize=7, ncol=2, facecolor="#3D1A1A", edgecolor="#aab2bd",
                    labelcolor="white", framealpha=.9)
     macd_ax.grid(True, color="#3a414b", linewidth=.4)
@@ -348,6 +349,7 @@ def analyze_looped_results(source_dir: str | Path, output_dir: str | Path) -> di
         raise FileNotFoundError(f"Input folder does not exist: {source}")
     if not output.is_dir():
         raise FileNotFoundError(f"Analysis output folder does not exist (not creating it): {output}")
+    #guide_path = Path(__file__).with_name("analysis_learning_resources.md")
     csv_paths = sorted(source.glob("data_*.csv"), key=lambda path: int(path.stem.split("_")[-1]))
     png_ids = {int(path.stem.split("_")[-1]) for path in source.glob("image_*.png")}
     csv_ids = {int(path.stem.split("_")[-1]) for path in csv_paths}
@@ -362,10 +364,13 @@ def analyze_looped_results(source_dir: str | Path, output_dir: str | Path) -> di
         csv_path, png_path = source / f"data_{run_id}.csv", source / f"image_{run_id}.png"
         with Image.open(png_path) as source_image:
             source_image.verify()
-        frame = pd.read_csv(csv_path, parse_dates=["Date"]).sort_values("Date").reset_index(drop=True)
+        frame = pd.read_csv(csv_path)
+        frame.columns = frame.columns.astype(str).str.strip()
         required = {"Date", "Open", "High", "Low", "Close"}
         if not required.issubset(frame.columns):
             raise ValueError(f"{csv_path.name} lacks required columns: {sorted(required-set(frame.columns))}")
+        frame["Date"] = pd.to_datetime(frame["Date"])
+        frame = frame.sort_values("Date").reset_index(drop=True)
         numeric = frame[["Open", "High", "Low", "Close"]].to_numpy(dtype=float)
         if not np.isfinite(numeric).all():
             raise ValueError(f"{csv_path.name} has non-finite OHLC values")
@@ -380,7 +385,7 @@ def analyze_looped_results(source_dir: str | Path, output_dir: str | Path) -> di
         summaries.append(metrics)
         processed_frames.append(frame)
         chart_path = output / f"image_{run_id}_analysis.png"
-        _draw_chart(frame, run_id, long_trade, short_trade, chart_path, Path(__file__).with_name("analysis_learning_resources.md"))
+        _draw_chart(frame, run_id, long_trade, short_trade, chart_path, guide_path)
         analysis_images.append((run_id, chart_path))
 
     summary = pd.DataFrame(summaries).sort_values("run")
@@ -392,6 +397,7 @@ def analyze_looped_results(source_dir: str | Path, output_dir: str | Path) -> di
     _overall_metrics(summary, bars, all_trades).to_csv(output / "overall_metrics.csv", index=False)
     _contact_sheet([(run_id, source / f"image_{run_id}.png") for run_id in run_ids], output / "all_source_charts_contact_sheet.png")
     _contact_sheet(analysis_images, output / "all_analysis_charts_contact_sheet.png")
+    shutil.copy2(guide_path, output / guide_path.name)
     return {"runs": len(run_ids), "bars": len(bars), "trades": len(all_trades), "output_dir": str(output)}
 
 

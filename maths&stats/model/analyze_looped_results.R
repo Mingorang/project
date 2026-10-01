@@ -443,7 +443,6 @@ for (run_position in seq_along(run_ids)) {
   long_label <- if (nrow(long_best)) sprintf("Long best: %.2fR", long_best$r_multiple[1L]) else "Long best: no valid crossover"
   short_label <- if (nrow(short_best)) sprintf("Short best: %.2fR", short_best$r_multiple[1L]) else "Short best: no valid crossover"
   price_plot <- price_plot + ggplot2::labs(
-    caption = paste(long_label, short_label, "Study links [1]-[11]: ../analysis_learning_resources.md", sep = " | ")
   )
   rsi_plot <- ggplot2::ggplot(data, ggplot2::aes(x = bar, y = rsi_14)) +
     ggplot2::geom_line(color = "#7651a8", linewidth = 0.7, na.rm = TRUE) +
