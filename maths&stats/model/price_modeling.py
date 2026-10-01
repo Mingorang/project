@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 import mplfinance as mpf
 import os
+from pathlib import Path
 from market_analysis import analyze_looped_results
 
 #Very cool, should learn R for data analysis to do something with this data
@@ -16,6 +17,8 @@ from market_analysis import analyze_looped_results
 #Add a for loop and a much larger csv file so the AI bot/script has access to data over a larger timeframe
 #If necessary change conditions as it is currently random and unaffected by market manipulation of large firms.
 
+# (Manually, no AI) change this for forex, take real-time , online data for some starting price of 2 currencies, (EUR/USD) and calculate each one seperately, and plot the difference, so the plot will show the Euro dvided by the USD for a more realistic simulation
+starting_price = float(input("Starting price: "))
 
 # Simulate OHLC stock data for a candle chart like the example image.
 master_dir = os.path.dirname(os.path.abspath(__file__))
@@ -29,6 +32,13 @@ if not os.path.isdir(analysis_dir):
     print(f"Analysis output folder does not exist: {analysis_dir}")
     print("Create the folder manually before generating data.")
     exit()
+
+
+def clear_generated_files(directory, patterns):
+    for pattern in patterns:
+        for path in Path(directory).glob(pattern):
+            if path.is_file():
+                path.unlink()
 
 rand.seed(rand.randint(-1000000,1000000))
 start_day = pd.Timestamp("2026-09-14")
@@ -66,6 +76,9 @@ else:
     print("Choose 1 for one plot or M for many plots.")
     exit()
 
+clear_generated_files(results_dir, ("data_*.csv", "image_*.png"))
+clear_generated_files(analysis_dir, ("*.csv", "*.png"))
+
 all_timestamps = []
 for offset in range(5):
     day = start_day + pd.Timedelta(days=offset)
@@ -75,14 +88,14 @@ for offset in range(5):
 
 def generate_daily():
     rows = []
-    prev_close = 100
+    prev_close = starting_price
     for ts in all_timestamps:
         open_price = prev_close
-        close_price = open_price + (6/15)*(rand.uniform(-vol_index,vol_index))
+        close_price = open_price + ((6/15)*(prev_close/100)*(rand.uniform(-vol_index,vol_index)))
         if not allow_negative:
             close_price = max(0.0, close_price)
 
-        wick_range = max(vol_index / 40, 0.025)
+        wick_range = max(vol_index / 40, 0.025)*(prev_close/100)
         high = max(open_price, close_price) + rand.uniform(0, wick_range)
         low = min(open_price, close_price) - rand.uniform(0, wick_range)
         if not allow_negative:
