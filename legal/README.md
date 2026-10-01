@@ -30,4 +30,4 @@ Hypothesis testing different conditions in distributions, need to first learn hy
  
  
  ## AI usage:
-I sometimes use AI for writing code, but I only add it to this repository if the code makes sense and not if most of the file is AI-generated.
+I use AI for writing code, specifically for projects that will take too long or I don't know how to write the code. However it is done so I can still edit parts that might need to change later. 
