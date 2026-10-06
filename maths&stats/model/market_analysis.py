@@ -220,7 +220,7 @@ def _draw_chart(frame: pd.DataFrame, run_id: int, best_long: Trade | None, best_
         axis.set_facecolor("black")
         axis.tick_params(colors="white")
         for spine in axis.spines.values():
-            spine.set_color("#aab2bd")
+            spine.set_color("#1e61bd")
 
     price_ax.yaxis.tick_right()
     price_ax.yaxis.set_label_position("right")
@@ -236,7 +236,8 @@ def _draw_chart(frame: pd.DataFrame, run_id: int, best_long: Trade | None, best_
         color = "#21d6a2" if close >= open_price else "#ff6b77"
         price_ax.vlines(xpos, low, high, color="#d7dde5", linewidth=.65, zorder=2)
         body_low = min(open_price, close)
-        body_height = max(abs(close - open_price), .012)
+        # The former 0.012 minimum made low-volatility candles dwarf the data and skew price-axis autoscaling.
+        body_height = abs(close - open_price)
         price_ax.add_patch(Rectangle((xpos-.30, body_low), .60, body_height, facecolor=color,
                                      edgecolor="#d7dde5", linewidth=.3, zorder=3))
     price_ax.plot(x, frame.fast_sma_5, color="#66b6ff", linewidth=1.0, label="SMA 5")
@@ -283,18 +284,32 @@ def _draw_chart(frame: pd.DataFrame, run_id: int, best_long: Trade | None, best_
     plt.close(figure)
 
 
-def _contact_sheet(items: list[tuple[int, Path]], output: Path, columns: int = 8, tile_width: int = 310, tile_height: int = 185) -> None:
-    rows = math.ceil(len(items) / columns)
-    sheet = Image.new("RGB", (columns * tile_width, rows * tile_height), "white")
-    draw = ImageDraw.Draw(sheet)
-    for position, (run_id, path) in enumerate(items):
-        x, y = (position % columns) * tile_width, (position // columns) * tile_height
-        with Image.open(path) as image:
-            image = image.convert("RGB")
-            image.thumbnail((tile_width - 12, tile_height - 28), Image.Resampling.LANCZOS)
-            sheet.paste(image, (x + (tile_width - image.width) // 2, y + 22))
-        draw.text((x + 6, y + 4), f"Run {run_id}", fill="#111111")
-    sheet.save(output)
+def _contact_sheet(
+    items: list[tuple[int, Path]],
+    output: Path,
+    columns: int = 8,
+    tile_width: int = 310,
+    tile_height: int = 185,
+    max_tiles: int = 256,
+) -> None:
+    for page_number, start in enumerate(range(0, len(items), max_tiles), start=1):
+        page_items = items[start:start + max_tiles]
+        rows = math.ceil(len(page_items) / columns)
+        sheet = Image.new("RGB", (columns * tile_width, rows * tile_height), "white")
+        draw = ImageDraw.Draw(sheet)
+        for position, (run_id, path) in enumerate(page_items):
+            x, y = (position % columns) * tile_width, (position // columns) * tile_height
+            with Image.open(path) as image:
+                image = image.convert("RGB")
+                image.thumbnail((tile_width - 12, tile_height - 28), Image.Resampling.LANCZOS)
+                sheet.paste(image, (x + (tile_width - image.width) // 2, y + 22))
+            draw.text((x + 6, y + 4), f"Run {run_id}", fill="#111111")
+
+        if len(items) > max_tiles:
+            page_output = output.with_name(f"{output.stem}_page_{page_number:03}{output.suffix}")
+        else:
+            page_output = output
+        sheet.save(page_output)
 
 
 def _overall_metrics(summary: pd.DataFrame, bars: pd.DataFrame, trades: list[Trade]) -> pd.DataFrame:
@@ -341,7 +356,13 @@ def _overall_metrics(summary: pd.DataFrame, bars: pd.DataFrame, trades: list[Tra
     return pd.DataFrame(values, columns=["measure", "value", "context"])
 
 
-def analyze_looped_results(source_dir: str | Path, output_dir: str | Path) -> dict:
+def analyze_looped_results(
+    source_dir: str | Path,
+    output_dir: str | Path,
+    render_charts: bool = True,
+    render_source_charts: bool = True,
+) -> dict:
+    """Analyze CSV runs, optionally requiring and rendering source/analysis charts."""
     source = Path(source_dir)
     output = Path(output_dir)
     if not source.is_dir():
@@ -352,17 +373,16 @@ def analyze_looped_results(source_dir: str | Path, output_dir: str | Path) -> di
     csv_paths = sorted(source.glob("data_*.csv"), key=lambda path: int(path.stem.split("_")[-1]))
     png_ids = {int(path.stem.split("_")[-1]) for path in source.glob("image_*.png")}
     csv_ids = {int(path.stem.split("_")[-1]) for path in csv_paths}
-    run_ids = sorted(csv_ids & png_ids)
+    run_ids = sorted(csv_ids & png_ids) if render_source_charts else sorted(csv_ids)
     if not run_ids:
-        raise ValueError(f"No matching data_N.csv and image_N.png pairs in {source}")
-    if csv_ids != png_ids:
+        expected = "matching data_N.csv and image_N.png pairs" if render_source_charts else "data_N.csv files"
+        raise ValueError(f"No {expected} in {source}")
+    if render_source_charts and csv_ids != png_ids:
         raise ValueError(f"Unmatched files: CSV-only={sorted(csv_ids-png_ids)}, PNG-only={sorted(png_ids-csv_ids)}")
 
     summaries, processed_frames, all_trades, analysis_images = [], [], [], []
     for run_id in run_ids:
         csv_path, png_path = source / f"data_{run_id}.csv", source / f"image_{run_id}.png"
-        with Image.open(png_path) as source_image:
-            source_image.verify()
         frame = pd.read_csv(csv_path)
         frame.columns = frame.columns.astype(str).str.strip()
         required = {"Date", "Open", "High", "Low", "Close"}
@@ -380,12 +400,14 @@ def analyze_looped_results(source_dir: str | Path, output_dir: str | Path) -> di
         frame = _add_indicators(frame, run_id)
         trades = _trades_for_run(frame, run_id)
         all_trades.extend(trades)
-        metrics, long_trade, short_trade = _metrics(frame, trades, run_id, png_path.name)
+        source_png = png_path.name if png_path.exists() else ""
+        metrics, long_trade, short_trade = _metrics(frame, trades, run_id, source_png)
         summaries.append(metrics)
         processed_frames.append(frame)
-        chart_path = output / f"image_{run_id}_analysis.png"
-        _draw_chart(frame, run_id, long_trade, short_trade, chart_path, guide_path)
-        analysis_images.append((run_id, chart_path))
+        if render_charts:
+            chart_path = output / f"image_{run_id}_analysis.png"
+            _draw_chart(frame, run_id, long_trade, short_trade, chart_path, guide_path)
+            analysis_images.append((run_id, chart_path))
 
     summary = pd.DataFrame(summaries).sort_values("run")
     bars = pd.concat(processed_frames, ignore_index=True)
@@ -394,14 +416,16 @@ def analyze_looped_results(source_dir: str | Path, output_dir: str | Path) -> di
     trade_columns = ["run", "side", "signal_index", "signal_time", "entry_index", "entry_time", "entry_price", "stop_price", "target_price", "risk_per_unit", "exit_index", "exit_time", "exit_price", "pnl_per_unit", "r_multiple", "exit_reason"]
     pd.DataFrame(all_trades, columns=trade_columns).to_csv(output / "crossover_trades.csv", index=False)
     _overall_metrics(summary, bars, all_trades).to_csv(output / "overall_metrics.csv", index=False)
-    _contact_sheet([(run_id, source / f"image_{run_id}.png") for run_id in run_ids], output / "all_source_charts_contact_sheet.png")
-    _contact_sheet(analysis_images, output / "all_analysis_charts_contact_sheet.png")
+    if render_source_charts:
+        _contact_sheet([(run_id, source / f"image_{run_id}.png") for run_id in run_ids], output / "all_source_charts_contact_sheet.png")
+    if render_charts:
+        _contact_sheet(analysis_images, output / "all_analysis_charts_contact_sheet.png")
     return {"runs": len(run_ids), "bars": len(bars), "trades": len(all_trades), "output_dir": str(output)}
 
 
 def main() -> None:
     model_dir = Path(__file__).resolve().parent
-    analysis_dir = model_dir / "looped_results_analysis_300"
+    analysis_dir = model_dir / "looped_analysis"
     result = analyze_looped_results(model_dir / "looped_results", analysis_dir)
     print(f"Analyzed {result['runs']} pairs / {result['bars']} bars / {result['trades']} trades -> {result['output_dir']}")
 
