@@ -1,0 +1,6 @@
+library(readr)
+library(dplyr)
+library(TTR)
+x <- read_csv(commandArgs(trailingOnly=TRUE)[1], show_col_types=FALSE)
+x <- x %>% mutate(rsi14=RSI(Close,n=14), sma5=SMA(Close,n=5))
+print(tail(select(x,Date,rsi14,sma5)))

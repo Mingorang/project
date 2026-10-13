@@ -1,0 +1,5 @@
+library(readr)
+library(dplyr)
+x <- read_csv(commandArgs(trailingOnly=TRUE)[1], show_col_types=FALSE)
+x <- x %>% mutate(log_return=log(Close/lag(Close)))
+print(x %>% summarise(mean_return=mean(log_return,na.rm=TRUE), volatility=sd(log_return,na.rm=TRUE)))
