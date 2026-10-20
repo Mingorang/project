@@ -1,0 +1,46 @@
+[ML] Historical[ML] Historical stock comparison: all runs are outside available historical coverage; intraday yfinance data is limited to recent dates and future candles cannot be matched.
+[ML] History cleared; training on this run only.
+[ML] Pruned 192 outlier run(s) (> 150.0% from the median) -> pruned_runs.csv
+
+[ML][forex eur/usd] Loaded 49808 rows from analysis_summary.csv
+[ML] Using 32 / 32 candidate features
+[ML][forex eur/usd] Label: future_return_pct > 0 (last part of each run; features use only the earlier bars); sample weights uniform
+[ML][forex eur/usd] Split (block):  train=34865  |  val=7471  |  test=7472
+[ML][forex eur/usd] Class balance - bullish: 23906 / 49808 (48.0%)  (expected about 50% on random data)
+[ML][forex eur/usd] Training RandomForestClassifier (n_estimators=500, min_samples_leaf=348)...
+[ML][forex eur/usd] OOB accuracy (train-set estimate): 0.5049
+[ML][forex eur/usd] Train accuracy : 0.5976
+[ML][forex eur/usd] Val   accuracy : 0.4920
+[ML][forex eur/usd] Test  accuracy : 0.4933
+[ML] Note: expected test accuracy about 0.50 on synthetic random data.
+     Compare with real historical data for forex eur/usd to assess market signal.
+[ML][forex eur/usd] Accuracy metrics saved -> C:\Users\Admin\AppData\Local\Temp\claude\C--Users-Admin-Documents-ml-project-stock-testing-generator\855fb7e1-cde5-4d85-ac9d-b935c31df9bb\scratchpad\run50k\ml_results\forex_eur_usd\5d\accuracy_metrics.csv
+[ML] Model saved          -> C:\Users\Admin\AppData\Local\Temp\claude\C--Users-Admin-Documents-ml-project-stock-testing-generator\855fb7e1-cde5-4d85-ac9d-b935c31df9bb\scratchpad\run50k\ml_results\forex_eur_usd\5d\model.pkl
+[ML] Predictions saved    -> C:\Users\Admin\AppData\Local\Temp\claude\C--Users-Admin-Documents-ml-project-stock-testing-generator\855fb7e1-cde5-4d85-ac9d-b935c31df9bb\scratchpad\run50k\ml_results\forex_eur_usd\5d\predictions.csv
+[ML] Importances saved    -> C:\Users\Admin\AppData\Local\Temp\claude\C--Users-Admin-Documents-ml-project-stock-testing-generator\855fb7e1-cde5-4d85-ac9d-b935c31df9bb\scratchpad\run50k\ml_results\forex_eur_usd\5d\feature_importances.csv
+[ML] Summary saved        -> C:\Users\Admin\AppData\Local\Temp\claude\C--Users-Admin-Documents-ml-project-stock-testing-generator\855fb7e1-cde5-4d85-ac9d-b935c31df9bb\scratchpad\run50k\ml_results\forex_eur_usd\5d\summary.txt
+[ML] Importance chart     -> C:\Users\Admin\AppData\Local\Temp\claude\C--Users-Admin-Documents-ml-project-stock-testing-generator\855fb7e1-cde5-4d85-ac9d-b935c31df9bb\scratchpad\run50k\ml_results\forex_eur_usd\5d\feature_importances.png
+[ML] Model comparison (purged 5-fold CV on the training block):
+                 model  cv_accuracy_mean  val_accuracy  test_accuracy  test_p_value_vs_chance
+hist_gradient_boosting             0.515         0.524          0.533                   0.000
+               xgboost             0.512         0.503          0.520                   0.001
+         random_forest             0.512         0.491          0.494                   0.303
+              lightgbm             0.512         0.506          0.514                   0.013
+           extra_trees             0.509         0.507          0.508                   0.191
+         logistic_tanh             0.506         0.493          0.500                   0.991
+              logistic             0.505         0.500          0.505                   0.373
+              mlp_tanh             0.504         0.508          0.509                   0.108
+[ML] Contributions (tree-path contributions (Saabas, exact decomposition of the forest probability)) -> feature_contributions.png/csv; top: macd_histogram_last, bollinger_width_squared, avg_true_range_points
+[ML] HTML report          -> C:\Users\Admin\AppData\Local\Temp\claude\C--Users-Admin-Documents-ml-project-stock-testing-generator\855fb7e1-cde5-4d85-ac9d-b935c31df9bb\scratchpad\run50k\summary_report.html
+
+[ML] Data split for 49808 rows (ordered blocks):
+  Training:   34865 rows (70.0%)
+  Validation: 7471 rows (15.0%)
+  Test:       7472 rows (15.0%)
+  Training fits the model; validation checks it during development.
+  This script reports validation accuracy but does not tune on validation data.
+  Test data stays held back for the final accuracy check.
+
+[ML] Done.
+
+end 21:21:35 exit=0
