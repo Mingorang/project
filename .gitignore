@@ -1,0 +1,63 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  Repository hygiene for the ML price-modelling project.
+#
+#  Everything listed here is REGENERATED output or local state — none of it
+#  belongs in version control. Measured on 20 October 2026, the untracked tree
+#  held 50,206 files / 3.5 GB, which made `git status` take minutes and left a
+#  single `git add .` able to break the repository (GitHub rejects files over
+#  100 MB, and several model.pkl / candle-index files are well past that).
+#
+#  Rule of thumb: if a script can recreate it, it does not get committed.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Generated simulation output ──────────────────────────────────────────────
+# price_modeling.py writes data_N.csv / image_N.png pairs here (410 MB, 50k files)
+stock_testing/generator/looped_results/
+# market_analysis.py and ml_model.py artefacts, incl. GB-scale candle indexes (3.1 GB)
+stock_testing/generator/looped_analysis/
+# analyze_looped_results.R output
+stock_testing/generator/looped_results_analysis_300/
+# archives written when [storage] archive_after_run = true in config.toml
+stock_testing/generator/looped_results_*.zip
+**/archived_runs.zip
+
+# ── Trained models and large binary artefacts ────────────────────────────────
+# A single forest from a 50k-run batch is ~4.4 MB; they are rebuilt by training.
+*.pkl
+*.joblib
+
+# ── Generated reports (rebuild: python routine/daily_routine.py) ─────────────
+stock_testing/generator/routine/reports/
+stock_testing/generator/looped_analysis/summary_report.html
+# NOTE: routine/routine_log.csv is deliberately NOT ignored — it is the
+# accumulating day-by-day record and is worth keeping in history.
+
+# ── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# ── R ────────────────────────────────────────────────────────────────────────
+.Rhistory
+.RData
+.Rproj.user/
+
+# ── Secrets — never commit these ─────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── Local backups ────────────────────────────────────────────────────────────
+Learn_backup.zip
+
+# ── OS and editor noise ──────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
