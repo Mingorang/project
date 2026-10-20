@@ -1,0 +1,1801 @@
+#1 If price moves in the same direction for many intervlas, probability decreases: so 1 for 1 interval* then multiply by (1-0.04*e) so the probability of 10 stocks in the same direction is  close to 3.2%
+Ideas: Outlier Run detection - % differeence for pruning should be implemented in the .toml file
+78 - volume simulation
+83 - Automated folder creation
+86 - HTML long summary report, keyword summary
+87 - every day send me a message at a set time on how to improve code for ml etc
+94 - cross validation
+?? - pls move the files it is 78,000 files at 7.6GB on my computer, killing disc space so suggest some safe cloud platform i can run it on, i already use git but can it go faster and also only choose free options
+95 - add a toml for random forest tuning, an extensive report on how to make the ml work, & hyperparamter tuning for random forest
+96 - other ml models, tanh(x), logistic regression, xgbboost, lightgbm, etc
+98- change parameters EACH RUN, to fit the current price as well as possible, so if i loop it 10000 times (40 iters * 10000), after each iter it will try and get as close to real price as it can (obviosly only for rewind/backtest) using all details it has such as abs(real-simulated), standard dev and all the other 30 or so.
+100- tut mode advanced and beginner
+
+master reading list:
+TIER 1 — Read these first (directly applicable to this codebase)
+
+"Advances in Financial Machine Learning" — López de Prado (Wiley, 2018) ISBN 978-1119482086. Ideas 22, 94 — leakage, cross-validation, finance ML.
+
+"Python for Data Analysis" — McKinney (O'Reilly, 3rd ed., 2022) ISBN 978-1098104030. Ideas 69, 73 — pandas, Parquet, data I/O.
+
+"Hands-On Machine Learning" — Géron (O'Reilly, 3rd ed., 2022) ISBN 978-1098125974. Ideas 95, 96 — RF tuning, model selection.
+
+"Python Testing with pytest" — Okken (Pragmatic Bookshelf, 2022) ISBN 978-1680509427. Idea 66 — test suite.
+
+"Technical Analysis of the Financial Markets" — Murphy (NYIF, 1999) ISBN 978-0735200661. Ideas 79, 80 — indicators and their meaning.
+
+TIER 2 — Read after Tier 1 6. "Robust Python" — Viafore (O'Reilly, 2021) Ideas 65, 90 — types, logging. 7. "Fluent Python" — Ramalho (O'Reilly, 2nd ed., 2022) Ideas 68, 90. 8. "Fundamentals of Data Visualization" — Wilke (O'Reilly, 2019) Ideas 71, 72. 9. "The Elements of Statistical Learning" — Hastie et al. (free PDF) Idea 96. 10. "Python Dash" — Schroeder et al. (No Starch, 2022) Idea 70. 11. "Probabilistic Machine Learning" — Murphy (MIT, 2022, free PDF) Idea 97. 12. "Practical MLOps" — Gift & Deza (O'Reilly, 2021) Idea 98. 13. "Docker: Up & Running" — Kane & Matthias (O'Reilly, 3rd ed., 2023) Idea 88. 14. "The Pragmatic Programmer" — Hunt & Thomas (20th ed., 2019) Ideas 61, 100.
+
+TIER 3 — Reference / depth reading 15. "Market Microstructure in Practice" — Lehalle & Laruelle (2013) Idea 78. 16. "Algorithmic and High-Frequency Trading" — Cartea et al. (2015) Idea 78. 17. "Sensitivity Analysis in Practice" — Saltelli et al. (2004) Idea 75. 18. "Clean Architecture" — Martin (2017) Idea 92. 19. "Refactoring" — Fowler (2nd ed., 2018) Idea 92.
+
+FREE ONLINE COURSES (no payment required, audit track) • "Machine Learning" — Andrew Ng, Coursera: https://www.coursera.org/learn/machine-learning • "Machine Learning for Trading" — Georgia Tech, Coursera: https://www.coursera.org/learn/machine-learning-trading • "Data Science: R Basics" — Rafael Irizarry, edX (HarvardX): https://www.edx.org/learn/r-programming/harvard-university-data-science-r-basics • "Introduction to Containers with Docker" — IBM, edX: https://www.edx.org/course/introduction-to-containers-with-docker-kubernetes-openshift-and-istio • "Data Visualization with Python" — IBM, Coursera: https://www.coursera.org/learn/python-for-data-visualization
+
+KEY WEBSITES TO BOOKMARK • https://realpython.com/ — best intermediate Python tutorials • https://scikit-learn.org/ — sklearn reference • https://plotly.com/python/ — interactive charting • https://mlflow.org/ — experiment tracking • https://r4ds.hadley.nz/ — R for Data Science (free) • https://ggplot2-book.org/ — ggplot2 (free) • https://www.statlearning.com/ — ISL textbook (free PDF) • https://hastie.su.domains/ElemStatLearn/ — ESL textbook (free PDF) • https://probml.github.io/ — Probabilistic ML (free PDF) • https://pandas.pydata.org/docs/ — pandas reference • https://tqdm.github.io/ — tqdm progress bars • https://docs.pytest.org/ — pytest • https://mypy.readthedocs.io/ — mypy type checker • https://pandera.readthedocs.io/ — data validation
+
+remaining 60 things to implement (long):
+─ SECTION A — SELF-CORRECTING ACCURACY (ideas 1-60) The core feedback loop: price_modeling → CSV / PNG → market_analysis (metrics) → backtest_compare (accuracy index vs real Yahoo data) → ML realises the data is off → Python adjusts vol_index in steps → repeat until an equilibrium is found
+
+THREE validity criteria (any one may be the target): [EXACT] The simulated path is visually / statistically near-identical to the real market path. [PRICE] The simulated open and close prices are within tolerance of the real open and close prices for the same window. [BARS] ≥ X % of bars move in the same direction (up/down) as the real bars that occupy the same position in the cycle. ──────────────────────────────────────────────────────────────────────────────
+
+VOLATILITY STEP-SEARCH (core self-correction loop) In price_modeling.py, after every Rewind & Replay loop, read backtest_compare's per-cycle accuracy_index from the rewind_*.csv files. If the index < target (e.g. 0.30), nudge vol_index by a configurable step (e.g. ±0.05 abs, or ±10 % relative) and re-run. Stop when the index crosses the target or a maximum number of iterations is reached. Expose: VOL_STEP_ABS, VOL_STEP_PCT, MAX_VOL_ITERS, VOL_TARGET in a [volatility_search] config block at the top of price_modeling.py.
+
+DIRECTION MATCH SCORE — [BARS] criterion After each loop, compute bar_direction_match_pct = (simulated bars with same up/down direction as real bars, aligned by position) / total paired bars. Store this alongside the accuracy_index in a new column of rewind_accuracy_summary.csv. Feed it to the vol search (idea 1) as a secondary stopping criterion alongside PATH accuracy.
+
+NET-MOVE MATCH — [PRICE] criterion Add a net_price_match metric: score = 1 − |sim_close − real_close| / real_close Use as a third stopping criterion. The vol search halts only when ALL selected criteria are simultaneously within their thresholds.
+
+MULTI-METRIC EQUILIBRIUM SURFACE Instead of optimising a single metric, define a composite F(v) = w1·path_score + w2·direction_match + w3·net_move_match Run a simple grid search over vol_index ∈ [v_min, v_max] in N steps, pick the v that maximises F. Store the optimal vol and F for every instrument + timeframe combination in looped_analysis/vol_equilibrium.csv.
+
+BINARY SEARCH OVER VOL_INDEX Replace linear stepping with a bisection search between a known-too-low and known-too-high vol_index. Converges in O(log N) iterations. Add a fallback to linear search if the monotonicity assumption breaks.
+
+PER-CYCLE VOL LEARNING Instead of one global vol_index for all cycles, maintain a per-cycle learned_vol vector in vol_equilibrium.csv. On each new Rewind run, initialise each cycle's vol from the nearest date's learned_vol.
+
+CARRY-OVER VOL HISTORY Persist the full (vol_index, accuracy_index, date, timeframe, instrument) table across runs. On new runs, seed the first search step from the median of the five most recent rows for the same instrument/timeframe, rather than always starting from the raw market_change value.
+
+REALISED-VOL FEEDBACK After analysis, market_analysis.py already computes realized_vol_per_bar_pct. Compare it to vol_index used during generation. If they diverge by > 20 %, automatically queue a vol_index adjustment and re-generate (only if in auto-correct mode).
+
+REGIME-AWARE VOLATILITY SCALING Detect market regime from Yahoo data (low-vol / trending / high-vol / mean-reverting) using an HMM or simple ATR-quantile rule. Apply a per-regime multiplier to vol_index before each cycle rather than a single scalar. Store multipliers in regime_vol_multipliers.csv.
+
+VOLATILITY SMILE / SKEW INJECTION The current model draws bar changes from Uniform(−v, +v). Replace with an asymmetric distribution (e.g. skew-normal or empirical histogram built from the real Yahoo closes for the same instrument). Fit the distribution once per run and adjust its parameters during the vol search.
+
+INTRADAY VARIANCE PROFILE For intraday timeframes (1d, 5d, 1m) the real market has a U-shaped variance curve (high at open/close, low midday). Store a 24-bucket variance multiplier per bar-time-of-day and apply it in generate_ohlc(). Self-correct the profile by comparing per-bar-time direction-match scores.
+
+AUTOCORRELATION CORRECTION Real price returns exhibit mild negative autocorrelation (mean-reversion). After each loop, measure the lag-1 autocorrelation of sim vs real returns. If they diverge, add an AR(1) correction term in generate_ohlc() and tune its coefficient during the vol search.
+
+JUMP DIFFUSION — FAT TAILS Real markets have jump risk (earnings, macro shocks). Add a Poisson jump component: with probability p_jump per bar, multiply the bar change by jump_size_multiplier (drawn from Exponential). Self-correct p_jump and jump_size by minimising the difference in kurtosis between sim and real return distributions.
+
+WICK-RATIO SELF-CORRECTION The current wick formula uses a fixed 3.5/15 ratio. Compute avg_wick_to_body_ratio from the real Yahoo OHLC data for the window and store it. During the vol search, adjust wick_factor alongside vol_index to minimise the error in that ratio.
+
+DIRECTION-MATCH ROLLING WINDOW Instead of comparing the full cycle at once, compute direction_match_pct in rolling windows of W bars (default 10). Flag windows where match drops below threshold and report them to the user as "weak segments" to guide further investigation.
+
+PATH RMSE TARGET BAND Introduce PATH_TARGET_LO / PATH_TARGET_HI tolerance band. The vol search stops once path_rmse falls inside the band (not just below a single threshold), preventing over-fitting to the exact real path.
+
+AUTOMATIC BACKTEST RE-RUN TRIGGER At the end of analyze_looped_results(), check whether any previously computed vol_equilibrium entry for this instrument/timeframe exists. If yes, compare the current accuracy_index to the stored one. If the new score is worse by > ACCURACY_DECAY_THRESHOLD, auto-trigger the vol search.
+
+VOLATILITY DECAY OVER CYCLES Implement exponential decay: vol_index(t) = vol0 · e^(−λ·t) so early cycles (further back in time) use higher vol to capture historical uncertainty, while recent cycles use tighter vol calibrated to current data. Self-correct λ via grid search.
+
+MULTI-RUN CONSENSUS VOL Run N independent vol searches with different random seeds; take the median optimal vol_index. Reduces luck-of-the-draw effects from random OHLC paths landing near the real path by chance.
+
+POPULATION-BASED VOL OPTIMISATION Implement a simple Genetic Algorithm (or CMA-ES) over the parameter vector [vol_index, wick_factor, jump_prob, ar1_coef]. Fitness = composite metric F (idea 4). Run for G generations with population P. Requires no gradient; works with the current stochastic generator.
+
+BAYESIAN VOL OPTIMISATION Use scikit-optimize's BayesSearchCV or a lightweight GP to build a surrogate model of F(vol_index). Requires only ~20 evaluations to find a near-optimal vol vs. ~100 for a grid search.
+
+DIRECTION-MATCH AS ML LABEL Replace total_return_pct > 0 as the ML target with direction_match_pct > 0.50 (i.e. "does this simulation move in the right direction more often than chance?"). This ties the classifier directly to the [BARS] criterion.
+
+PRICE-MATCH RESIDUAL AS ML FEATURE Add net_price_error_pct = |sim_close − real_close| / real_close as a feature in ml_model.py (only for Rewind & Replay runs where the real price is known). The model learns which indicator patterns correlate with price-match quality.
+
+ACCURACY-WEIGHTED SAMPLE IMPORTANCE Weight training rows in the Random Forest by their per-run accuracy_index (higher accuracy → higher weight). Implemented via sample_weight in sklearn. Forces the model to pay more attention to runs that were already good matches.
+
+ONLINE LEARNING — INCREMENTAL RANDOM FOREST Replace the batch RF with sklearn's warm_start option (or a River / scikit-multiflow IHT) so each new batch of runs updates the forest without discarding old knowledge.
+
+FEATURE IMPORTANCE → VOL SENSITIVITY MAP After each ML run, correlate feature importances with the vol_index used for each run (stored in analysis_summary.csv → add a vol_index column). Output a feature×vol sensitivity heatmap so the user can see which indicators respond most to vol changes.
+
+CONFORMAL PREDICTION INTERVALS ON VOL_INDEX Wrap the ML classifier in a conformal predictor to produce calibrated p-values on whether a given vol_index will produce a "good" simulation. Use these intervals to bound the vol search space.
+
+ADVERSARIAL VALIDATION FOR LEAKAGE Train a second RF to classify whether a row came from the "sim" or "real" price data. If its AUC > 0.55, flag possible leakage or distribution shift; if AUC ≈ 0.50, the two distributions are statistically indistinguishable — a meaningful self-validation milestone.
+
+TRANSFER LEARNING ACROSS INSTRUMENTS Store learned vol equilibria per instrument + timeframe. When a new instrument is first run, initialise its vol search from the nearest instrument (by asset class or beta) rather than from scratch.
+
+ROLLING FORECAST RE-CALIBRATION LOOP Implement a walk-forward recalibration scheduler: every K new runs → re-run vol search → update vol_equilibrium.csv K is configurable (default K = 100 runs). Triggered automatically at the end of run_forward() if auto-recalibrate=True.
+
+EXACT-REPLICA SCORING (composite) Introduce an EXACT score: exact = α·path_score + β·direction_match + γ·net_move_match + δ·wick_ratio_match Store thresholds α,β,γ,δ and EXACT_PASS_THRESHOLD in config. A run "passes" if exact ≥ threshold. Log pass rate per vol_index value.
+
+DIRECTION-STREAK MATCHING Beyond bar-by-bar direction, compare the distribution of consecutive same-direction streaks (runs of ups/downs) between sim and real. Use KS-test p-value > 0.05 as an extra stopping criterion.
+
+DISTRIBUTION COMPARISON (KL Divergence) After each vol iteration, compute KL divergence between the simulated and real return distributions (using kernel density estimates). Minimise KL divergence as an alternative objective to accuracy_index.
+
+AUTOCORRELATION MATCH Compute the full ACF (lags 1-20) for both sim and real returns; minimise the sum of squared differences between the two ACF vectors. Exposes structural differences that RMSE misses.
+
+MONTE CARLO VOL CALIBRATION For a given vol_index v, generate M independent paths, compute the median accuracy_index, and treat that as F(v). Averaging removes single-path noise. Self-correcting convergence: stop when |F(v_new) − F(v_old)| < CONVERGENCE_EPS for three consecutive steps.
+
+VOLATILITY REGIME CHANGE DETECTION After several Rewind runs, fit a change-point model (ruptures library, or a simple CUSUM) to the sequence of learned vol values over time. Alert the user when a structural break is detected (e.g. an asset entered a new regime).
+
+REWARD SIGNAL FROM CROSSOVER WIN RATE The analysis already tracks winning_crossover_trades. Treat the sim's crossover win rate as a second reward signal: if it deviates from the real market's known win rate by > W %, nudge vol accordingly.
+
+CANDLE-BODY-TO-RANGE SELF-CORRECTION candle_body_to_range_ratio (already a feature) should match the real market's ratio. Add it to the equilibrium objective as a soft constraint.
+
+DRAWDOWN REALISM CHECK After each vol search step, compare the simulated median max_drawdown_pct to the real market's drawdown over the same window. If they diverge by
+
+DRAWDOWN_TOLERANCE, add a drawdown-matching term to the vol search objective.
+
+ITERATIVE DEEPENING — NARROW THEN WIDEN First run the vol search on a coarse grid (step = 0.50); once the best coarse v is found, refine in a ±0.50 neighbourhood on a fine grid (step = 0.05). Faster than a uniformly fine search.
+
+ENSEMBLE OF GENERATORS — VOTING Run K generators with different random seeds but the same vol_index. Compute direction_match for each; take the majority vote. Use the ensemble's majority-agreed direction as the target label for ML.
+
+HYBRID GBM + EMPIRICAL QUANTILE GENERATOR Replace the pure uniform generator with a Geometric Brownian Motion step where σ is drawn from the empirical quantile of real bar-returns. During the vol search, tune the quantile level (e.g. 50th→70th percentile) to match target accuracy metrics.
+
+AUTOMATIC VOL_INDEX RANGE DISCOVERY Before the vol search, compute the per-bar empirical standard deviation of real Yahoo returns for the window. Set v_min = 0.1 × σ_real and v_max = 5 × σ_real. Prevents the search from exploring unrealistic ranges.
+
+VOL CONFIDENCE INTERVAL OUTPUT After the vol search, report a 90 % bootstrap confidence interval on the optimal vol_index. Helps the user understand estimation uncertainty.
+
+REALTIME ACCURACY DASHBOARD (R Shiny) Create a small Shiny app in the generator folder that reads vol_equilibrium.csv and rewind_*.csv and plots: • accuracy_index vs vol_index (search path) • direction_match_pct over time • convergence history (iterations needed per instrument) Auto-refreshes every 30 s while a run is active.
+
+SELF-CORRECTING WICK ASYMMETRY Real bear candles (close < open) typically have longer lower wicks than bull candles. Introduce separate wick multipliers for bull/bear candles and tune them in the vol search to match the real bar wick statistics.
+
+GAP SELF-CORRECTION analysis_summary already reports gap_bars and avg_abs_gap_points. Compare these to real Yahoo data for the same window. Adjust the open-price gap injection probability in generate_ohlc() to match real gap frequency.
+
+CORRELATION-AWARE MULTI-ASSET VOL If simulating a portfolio of instruments, maintain a vol correlation matrix. After each loop, compare the sim correlation between instrument returns to the real historical correlation. Adjust vol_index for each instrument so the cross-asset correlation converges.
+
+LEARNING RATE SCHEDULING FOR VOL SEARCH Start with a large step size; halve it each time the search overshoots (accuracy oscillates). Produces faster, smoother convergence.
+
+CONVERGENCE CERTIFICATE At the end of the vol search, store a convergence_certificate.json that records: optimal_vol, accuracy achieved, criteria met (exact/price/bars), n_iterations, random_seed, timestamp. Use it to reproduce the equilibrium exactly.
+
+SYNTHETIC DATA AUGMENTATION FOR ML After the vol search, generate an additional N_AUG runs at the optimal vol_index with new random seeds. Add these "high-quality" runs to the ML training set with a boosted sample weight.
+
+INTERPRETABILITY OF VOL DECISIONS (SHAP) Use SHAP (shap library) to explain why the ML model predicts "good" or "bad" match. Plot feature contributions per run and overlay with the vol_index used. Helps humans understand what the model is learning.
+
+GRADIENT-FREE VOL TUNING WITH COBYLA Use scipy.optimize.minimize(method='COBYLA') to minimise −F(vol_index) subject to vol_index > 0 and vol_index < v_max. Only evaluates F at feasible points; no derivatives required.
+
+INFORMATION RATIO VS REAL MARKET AS TARGET Compute the Sharpe ratio of (sim returns − real returns) across bars. A truly accurate simulation minimises this to ~0. Use it as the stopping criterion in the vol search.
+
+SEQUENTIAL TESTING — EARLY STOPPING Apply a sequential probability ratio test (SPRT) after each vol search step: if H0 (vol_index is already optimal) cannot be rejected at α=0.05, stop early. Saves computation on already-calibrated instruments.
+
+VOL SEARCH AUDIT LOG Write every step of the vol search to vol_search_audit.csv: (iteration, vol_index, path_score, direction_match, net_move_match, composite_F, step_delta, reason_for_step) Enables post-hoc debugging and visualisation of the search path.
+
+PERIODIC RE-CALIBRATION CRON Add a CLI flag --auto-recal that, after each Rewind loop, automatically checks if the stored optimal vol is more than N_DAYS old. If so, runs a lightweight vol search (5 iterations, coarse step) to refresh it.
+
+GENETIC ALGORITHM OVER TIMEFRAME + INTERVAL Beyond vol_index, include the choice of timeframe and interval as discrete genes in a GA. Fitness = accuracy_index on the chosen window. Finds the most "simulatable" market segment for a given instrument.
+
+SYNTHETIC BENCHMARK — NULL-HYPOTHESIS TEST Each self-correction run should also generate a "null" run with vol_index set to the raw market change (no optimisation). Report improvement_over_null = (optimal_F − null_F) / null_F so the user knows how much the self-correction actually helped.
+
+FEEDBACK LOOP STATUS SUMMARY At the end of every Rewind & Replay run, print a one-line "equilibrium report": [Equilibrium] vol=X.XX | path=0.NN | dir=NN% | price_err=±0.NN% | converged=YES/NO after N iterations Write the same line to looped_analysis/equilibrium_log.txt (appended)
+
+
+################################################################################
+#  IDEA REGISTRY v2  --  ideas 201-510, added 2026-10-20
+#
+#  These records are machine-readable. Use the CLI instead of scrolling:
+#      python ideas.py 201             show one idea
+#      python ideas.py --search leak   search title / why / do
+#      python ideas.py --phase 1       everything for phase 1
+#      python ideas.py --tag costs     filter by tag
+#      python ideas.py --next          next undone idea, lowest phase first
+#      python ideas.py --done 201      mark complete
+#      python ideas.py --stats         progress by phase and tag
+#      python ideas.py --random        one at random, for when you are stuck
+#
+#  Record format (do not reformat; the parser depends on it):
+#      ### IDEA-NNN :: Title
+#      phase: N | effort: S|M|L | tags: a,b
+#      why: the justification
+#      do:  the concrete action
+#
+#  Phases match Learn/THE_QUANT_BUILD_MANUAL.md Part IV:
+#      0 stop the bleeding   1 data foundation   2 feature factory
+#      3 model layer         4 validation        5 production
+#  Effort: S under 2h | M about half a day | L multi-day
+#
+#  Completion status lives in ideas_status.json, not in this file, so that
+#  this file stays a stable reference and progress stays easy to diff.
+################################################################################
+
+# ============================================================================
+# CATEGORY A -- DATA FOUNDATION AND THE PANEL (201-240)
+# Measured constraint: n=1,250 rows supports about 12 features. Everything in
+# this category exists to turn n=1,250 into n=600,000 so that the stated goal
+# of "hundreds if not thousands of variables" becomes arithmetically possible.
+# ============================================================================
+
+### IDEA-201 :: Define the instrument universe as a rule, not a list
+phase: 1 | effort: M | tags: data,panel,survivorship
+why: A hardcoded ticker list silently becomes survivorship-biased the moment a name delists.
+do:  Write universe_rule(date) returning members as of that date: top N by dollar volume from a point-in-time listing. Store the rule and the resolved membership per date.
+
+### IDEA-202 :: Resumable, rate-limited bulk downloader
+phase: 1 | effort: L | tags: data,infra
+why: A 500-symbol download that dies at symbol 380 and restarts from zero costs hours and risks an IP block.
+do:  Per-symbol Parquet cache, a manifest of completed symbols, exponential backoff, and a --resume flag that skips what already exists.
+
+### IDEA-203 :: Never silently skip a failed symbol
+phase: 1 | effort: S | tags: data,integrity
+why: Silent skips shrink the universe invisibly and bias it toward well-behaved names.
+do:  Write failures to download_failures.csv with the exception text; fail the build when failures exceed 2 percent of the universe.
+
+### IDEA-204 :: Long-format panel as the single source of truth
+phase: 1 | effort: M | tags: data,panel
+why: Wide frames break the moment universe membership changes, which it does constantly.
+do:  One row per (instrument, date), indexed on both. Every downstream join keys off this one table.
+
+### IDEA-205 :: Trading-calendar alignment, not calendar-day alignment
+phase: 1 | effort: M | tags: data,calendar
+why: FX trades 24/5 and LSE and NYSE have different holidays; naive joins create phantom NaN rows.
+do:  Build an explicit session calendar per venue, reindex to it, and assert no row exists on a non-session day.
+
+### IDEA-206 :: Forbid silent forward-fill
+phase: 1 | effort: S | tags: data,integrity,leakage
+why: ffill on a price invents data that never traded and carries the last real value forward indefinitely.
+do:  Ban .ffill() without a limit. Where genuinely needed, cap it and emit a staleness column counting bars since the real observation.
+
+### IDEA-207 :: Staleness feature for every forward-filled field
+phase: 2 | effort: S | tags: data,features
+why: The model should know when a value is old, and staleness is itself predictive of illiquidity.
+do:  For each filled field emit <field>_age_bars and use it as both a feature and a filter.
+
+### IDEA-208 :: Adjusted and unadjusted prices stored side by side
+phase: 1 | effort: M | tags: data,corporate-actions
+why: Vendors restate adjusted history after every split and dividend, so a backtest run twice gives two answers.
+do:  Store raw prices plus an adjustment-factor series; reconstruct adjusted prices at read time so history stays immutable.
+
+### IDEA-209 :: Corporate-action audit
+phase: 1 | effort: M | tags: data,integrity
+why: An unhandled 10-for-1 split looks like a minus 90 percent return and poisons every return feature for that name.
+do:  Flag any absolute daily return above 50 percent, cross-check against a split and dividend feed, quarantine unexplained cases.
+
+### IDEA-210 :: Delisting returns handled explicitly
+phase: 1 | effort: M | tags: data,survivorship
+why: Dropping delisted names inflates returns; treating a delisting as a zero return understates the loss.
+do:  Source the final delisting return where possible, otherwise apply a documented conservative assumption and record which rows used it.
+
+### IDEA-211 :: Point-in-time index membership
+phase: 1 | effort: L | tags: data,survivorship
+why: Today's S&P 500 is not the 2019 S&P 500, and using today's membership is straightforward look-ahead.
+do:  Store membership intervals as (symbol, start, end) and resolve membership per date.
+
+### IDEA-212 :: Parquet with date partitioning
+phase: 1 | effort: M | tags: infra,storage
+why: processed_bars.csv reached 1.6 GB at 50,000 runs and the 50k training run died, most likely on memory.
+do:  Partition by year, read only required columns, and expect better than 85 percent size reduction against CSV.
+
+### IDEA-213 :: Column-subset reads everywhere
+phase: 1 | effort: S | tags: infra,performance
+why: Loading 76 columns in order to use 6 is most of the memory failure.
+do:  Every read_parquet call passes an explicit columns list; ban bare reads in code review.
+
+### IDEA-214 :: Chunked processing with checkpoints
+phase: 1 | effort: M | tags: infra,reliability
+why: A run that dies at 95 percent leaving a zero-byte log loses the entire runtime, which happened on 2026-10-20.
+do:  Process in instrument batches, write partial output per batch, and support --resume from the last checkpoint.
+
+### IDEA-215 :: Unbuffered logging for long jobs
+phase: 0 | effort: S | tags: infra,debugging
+why: The 50k run produced a zero-byte log after 22 minutes of compute, so the cause is still unconfirmed.
+do:  Run long jobs with python -u or flush after every stage, and log a heartbeat line per batch.
+
+### IDEA-216 :: Data dictionary with units
+phase: 1 | effort: M | tags: data,documentation
+why: Six months from now you will not remember whether a column is a fraction, a percent or basis points.
+do:  One YAML entry per field: name, dtype, unit, source, knowable-at offset, valid range.
+
+### IDEA-217 :: Range assertions generated from the data dictionary
+phase: 1 | effort: M | tags: data,integrity
+why: Declared valid ranges that nothing checks are documentation, not safety.
+do:  Generate validators from the dictionary, run them on every panel build, and fail on violation.
+
+### IDEA-218 :: Cross-source price reconciliation
+phase: 1 | effort: L | tags: data,integrity
+why: A single vendor's errors are invisible without a second opinion.
+do:  Pull a sample of 20 symbols from a second free source and alert when closes differ by more than 10 basis points.
+
+### IDEA-219 :: Timezone normalisation to UTC with venue tags
+phase: 1 | effort: M | tags: data,calendar
+why: Mixing London and New York timestamps creates several hours of look-ahead, invisibly.
+do:  Store UTC plus a venue column, convert only at display time, and test across a DST transition week.
+
+### IDEA-220 :: Liquidity screen applied before anything else
+phase: 1 | effort: S | tags: data,universe
+why: Illiquid names generate large fake returns and uncrossable spreads that flatter every backtest.
+do:  Require median 60-day dollar volume above a floor and a minimum price, applied as of each date.
+
+### IDEA-221 :: Universe size sensitivity test
+phase: 1 | effort: M | tags: data,validation
+why: A result that exists at 500 names and vanishes at 200 depends on the tail, which is exactly where costs bite hardest.
+do:  Re-run the headline result at 100, 200 and 500 names and report all three figures together.
+
+### IDEA-222 :: Multi-asset panel, not equities alone
+phase: 2 | effort: L | tags: data,panel,diversification
+why: Your five current instruments span FX and equities, and GBP/USD and EUR/USD correlate at 0.85, so they are one bet.
+do:  Add FX pairs, rates and commodity futures with an asset-class column, and let the model use class as a feature.
+
+### IDEA-223 :: Crypto as an out-of-sample laboratory
+phase: 4 | effort: M | tags: data,validation
+why: Crypto trades 24/7 with a short history and different microstructure, so a factor surviving there has generalised.
+do:  Hold crypto out entirely during development, test once at the end, and report it as a true out-of-sample result.
+
+### IDEA-224 :: Intraday bars for sample-size relief
+phase: 2 | effort: L | tags: data,sample-size
+why: Five-minute equity bars give roughly 98,000 rows per instrument per five years against 1,250 daily.
+do:  Evaluate a five-minute panel for a small universe; yfinance caps intraday history near 60 days, so budget for a paid source or accept a short window.
+
+### IDEA-225 :: Volume-bar and dollar-bar sampling
+phase: 3 | effort: L | tags: data,sampling
+why: Clock-time bars oversample quiet periods, because information arrives with volume rather than with time.
+do:  Resample into bars of equal traded dollar volume and compare return normality against time bars.
+
+### IDEA-226 :: Overnight and intraday returns as separate series
+phase: 2 | effort: M | tags: features,microstructure
+why: The two have different volatility, different autocorrelation and different economic drivers.
+do:  Split close-to-open from open-to-close, feature both, and test whether either carries the signal alone.
+
+### IDEA-227 :: Record the data vintage on every build
+phase: 1 | effort: S | tags: data,reproducibility
+why: Vendors silently revise history, and a result you cannot reproduce is not a result.
+do:  Hash the raw files and store the hash in the run card alongside git commit and seed.
+
+### IDEA-228 :: Immutable raw layer
+phase: 1 | effort: M | tags: data,architecture
+why: Overwriting raw downloads destroys your ability to reproduce an older result.
+do:  Three layers: raw (write-once, dated), interim (cleaned), processed (features). Never write upward.
+
+### IDEA-229 :: Synthetic panel for fast pipeline testing
+phase: 1 | effort: M | tags: testing,infra
+why: Testing the pipeline against 600,000 real rows is slow and the ground truth is unknown.
+do:  Generate a tiny fake panel with known properties and run the full pipeline on it in CI in under 60 seconds.
+
+### IDEA-230 :: Missing-data taxonomy
+phase: 1 | effort: M | tags: data,integrity
+why: Not traded, not yet listed, halted and vendor gap are four different things that must not share one NaN.
+do:  Encode the reason in a status column so the model sees the reason rather than only the absence.
+
+### IDEA-231 :: Halt and limit-move flags
+phase: 2 | effort: M | tags: data,microstructure
+why: A limit-up day is an unfillable price, and backtests that trade it book imaginary profit.
+do:  Flag zero-range bars and suspiciously round extremes, and exclude them from tradable signals.
+
+### IDEA-232 :: Minimum history requirement per instrument
+phase: 1 | effort: S | tags: data,universe
+why: An instrument with 40 bars cannot support a 60-day feature and will come out entirely NaN.
+do:  Require max(feature lookback) plus label horizon bars before an instrument enters the panel on a date.
+
+### IDEA-233 :: Panel density report
+phase: 1 | effort: S | tags: data,monitoring
+why: A panel that looks like 500 names may average 180 usable ones per date.
+do:  Plot the count of usable instruments per date and investigate every discontinuity.
+
+### IDEA-234 :: Currency normalisation
+phase: 2 | effort: M | tags: data,panel
+why: Mixing SAP in euros with TSLA in dollars conflates equity returns with currency returns.
+do:  Convert all returns to a single base currency, or hedge them, and state in the write-up which you did.
+
+### IDEA-235 :: Benchmark series alongside the panel
+phase: 1 | effort: S | tags: data,validation
+why: Cross-sectional work needs a market factor to neutralise against.
+do:  Store index levels, a risk-free proxy and sector indices on the same calendar as the panel.
+
+### IDEA-236 :: Dividend yield as a field, not an adjustment
+phase: 2 | effort: M | tags: data,features
+why: Yield is predictive in its own right and is destroyed by baking it into adjusted prices.
+do:  Keep dividend events as their own series and derive trailing and forward yield features from them.
+
+### IDEA-237 :: Instrument metadata table
+phase: 1 | effort: S | tags: data,panel
+why: Sector, country, listing venue and share class drive most cross-sectional structure.
+do:  One mostly-static table keyed by symbol, with effective-dated rows for anything that changes.
+
+### IDEA-238 :: Automated daily panel refresh
+phase: 5 | effort: M | tags: infra,production
+why: A panel rebuilt by hand drifts, and eventually stops being rebuilt at all.
+do:  Extend routine/daily_routine.py to append the previous session's bar, recompute incremental features and alert on failure.
+
+### IDEA-239 :: Panel build time budget
+phase: 1 | effort: S | tags: infra,performance
+why: If a full rebuild takes six hours you will stop rebuilding and start trusting stale data.
+do:  Set a two-hour budget for a full rebuild, then profile and fix whatever breaches it.
+
+### IDEA-240 :: Scheduled disk hygiene
+phase: 1 | effort: S | tags: infra,storage
+why: The repository already carries roughly 78,000 files and disk pressure causes real, confusing failures.
+do:  Extend prune_disk_space.py to run on a schedule, archive runs older than N days and report the ten largest directories.
+
+# ============================================================================
+# CATEGORY B -- POINT-IN-TIME CORRECTNESS AND LEAKAGE (241-270)
+# Measured problem: label_mode="return" scored 0.92-0.96 on random walks while
+# shuffled labels scored 0.50. Every idea here exists to stop that recurring.
+# ============================================================================
+
+### IDEA-241 :: Promote the leakage audit from warning to exception
+phase: 0 | effort: S | tags: leakage,critical
+why: leakage_audit() has printed a warning on every run you have ever done and training continued regardless.
+do:  Add leakage_guard(audit, label_mode) immediately after audit.to_csv and raise ValueError naming the offending features.
+
+### IDEA-242 :: Default label_mode to forecast
+phase: 0 | effort: S | tags: leakage,critical
+why: The "return" default measures features and label over the same finished path, which is the entire 0.92.
+do:  Set label_mode = "forecast" in config.toml and treat "return" as a diagnostic mode only.
+
+### IDEA-243 :: Knowable-at timestamp on every field
+phase: 1 | effort: L | tags: leakage,architecture
+why: Leakage is fundamentally a timestamp error, so make timestamps structural rather than a convention.
+do:  Every field carries knowable_at, and the feature builder refuses to read a field whose knowable_at exceeds the feature date.
+
+### IDEA-244 :: Automated look-ahead unit test
+phase: 1 | effort: M | tags: leakage,testing
+why: A convention that nothing tests is a convention that will eventually be broken.
+do:  Corrupt all data after date T, rebuild features up to T, and assert nothing changed. Any change is look-ahead.
+
+### IDEA-245 :: Shuffled-label canary in CI
+phase: 0 | effort: S | tags: leakage,testing
+why: Shuffled labels scored 0.50 while real labels scored 0.92, and that gap is your leak detector.
+do:  Run the pipeline with permuted labels on every commit and fail CI if accuracy exceeds 0.55.
+
+### IDEA-246 :: Fit preprocessing inside the fold, never outside
+phase: 1 | effort: M | tags: leakage
+why: StandardScaler().fit(X_all) leaks test means and standard deviations into training.
+do:  Wrap every transform in a Pipeline fitted per fold and ban bare .fit() on the full frame in review.
+
+### IDEA-247 :: Embargo sized from the label horizon
+phase: 1 | effort: S | tags: leakage,validation
+why: embargo_pct=0.02 gives 25 bars on 1,250 rows, far too small for a 60-day feature lookback.
+do:  Set embargo to label_horizon plus two or three times the feature lookback. Compute it rather than hardcoding a percentage.
+
+### IDEA-248 :: Sample uniqueness weighting
+phase: 3 | effort: M | tags: leakage,validation
+why: Overlapping forward returns mean consecutive rows share most of their information, making confidence intervals roughly three times too narrow.
+do:  Implement Lopez de Prado chapter 4 uniqueness weights and pass them as sample_weight.
+
+### IDEA-249 :: Separate the label module from the feature module
+phase: 1 | effort: M | tags: leakage,architecture
+why: Relying on a maintained exclusion list is how net_change_points got excluded while bullish_candle_pct did not.
+do:  Build labels and features in separate modules that share no inputs, so same-path leakage is structurally impossible.
+
+### IDEA-250 :: Rolling-window purity test
+phase: 2 | effort: M | tags: leakage,testing
+why: pandas .rolling(center=True) reads the future and nothing warns you.
+do:  Grep for center=True across the codebase and assert every rolling call is right-aligned.
+
+### IDEA-251 :: Feature-label correlation ceiling
+phase: 2 | effort: S | tags: leakage,monitoring
+why: Any single feature with absolute Spearman above 0.5 against the label is almost certainly a restatement of it.
+do:  Flag and investigate everything above the threshold; this is the regression analogue of the AUC audit.
+
+### IDEA-252 :: Document the leakage that is acceptable
+phase: 2 | effort: S | tags: leakage,documentation
+why: Some information genuinely is available early, and blanket paranoia removes real signal.
+do:  Keep a written register of exceptions with the justification for each one.
+
+### IDEA-253 :: Restatement-aware fundamentals
+phase: 2 | effort: L | tags: leakage,fundamentals
+why: Reported figures are revised for quarters afterwards, so using the final value is months of look-ahead.
+do:  Use as-first-reported values with their publication dates, never the period end date.
+
+### IDEA-254 :: Macro release dates, not reference periods
+phase: 2 | effort: M | tags: leakage,macro
+why: September CPI is published in October, so dating it to September leaks several weeks.
+do:  Store both dates and index every macro feature on the release date only.
+
+### IDEA-255 :: Survivorship test by construction
+phase: 1 | effort: M | tags: leakage,survivorship
+why: A universe built from names that exist today has silently deleted every failure.
+do:  Count instruments leaving the panel over time; a count of zero proves the universe is biased and must be rebuilt.
+
+### IDEA-256 :: Verify train-before-test mechanically
+phase: 1 | effort: S | tags: leakage,validation
+why: An off-by-one in fold construction is invisible and fatal.
+do:  Assert max(train_dates) < min(test_dates) - embargo on every split, in code, on every run.
+
+### IDEA-257 :: One feature implementation shared by research and production
+phase: 5 | effort: M | tags: leakage,production
+why: Two implementations of the same feature will diverge, and the divergence is silent look-ahead.
+do:  Share one implementation and test that live output matches backtest output on an overlapping date.
+
+### IDEA-258 :: Timestamp the prediction, not only the outcome
+phase: 5 | effort: S | tags: leakage,production
+why: A prediction log without a creation timestamp cannot prove the prediction preceded the outcome.
+do:  Log prediction time, data-as-of time and outcome time as three distinct fields.
+
+### IDEA-259 :: Lag every signal by at least one bar
+phase: 3 | effort: S | tags: leakage,execution
+why: You cannot trade the close you used to compute the signal.
+do:  A signal computed on bar t trades at bar t+1 open, enforced in exactly one place in the codebase.
+
+### IDEA-260 :: Execution-price realism
+phase: 4 | effort: M | tags: leakage,costs
+why: Filling at the close is an assumption that flatters every backtest.
+do:  Fill at the next open, or at VWAP over a window, and report the sensitivity between the two choices.
+
+### IDEA-261 :: Leakage review checklist on every change
+phase: 1 | effort: S | tags: leakage,process
+why: Leaks enter through small changes that nobody reviewed for leakage specifically.
+do:  Keep a six-line checklist in the PR template and do not merge without it ticked.
+
+### IDEA-262 :: Quarantine rather than delete suspicious features
+phase: 2 | effort: S | tags: leakage,process
+why: Deleting loses the information that the feature was suspicious and why.
+do:  Move to a quarantine list carrying the audit number and the reason, and review it quarterly.
+
+### IDEA-263 :: Re-audit after every feature addition
+phase: 2 | effort: S | tags: leakage,process
+why: Leakage is introduced by changes, so audit on change rather than on a calendar.
+do:  Make the audit a pre-commit hook on the feature module.
+
+### IDEA-264 :: Test the audit with a deliberately planted leak
+phase: 1 | effort: M | tags: leakage,testing
+why: An audit that has never caught anything may simply be broken.
+do:  Inject a column equal to the shifted label and assert the audit catches it. Run this in CI.
+
+### IDEA-265 :: Cross-sectional leakage is a separate hazard
+phase: 2 | effort: M | tags: leakage,panel
+why: A z-score computed over the full history leaks future cross-sections backwards into the past.
+do:  Compute every cross-sectional statistic per date, using that date's cross-section only.
+
+### IDEA-266 :: Winsorisation bounds from training data only
+phase: 2 | effort: S | tags: leakage,features
+why: Clipping at full-sample 1st and 99th percentiles leaks the test distribution into training.
+do:  Fit clip bounds on the training fold and apply them unchanged to test.
+
+### IDEA-267 :: Feature selection inside the fold
+phase: 3 | effort: M | tags: leakage,validation
+why: Selecting the top 100 features on the full sample and then cross-validating is a classic and severe leak.
+do:  Make selection part of the pipeline so it refits per fold. Expect scores to drop; that drop was always fake.
+
+### IDEA-268 :: Hyperparameters chosen on validation, never on test
+phase: 3 | effort: S | tags: leakage,validation
+why: Touching test even once makes it a validation set and its honesty is permanently gone.
+do:  Lock the test set behind an accessor that records every access, and review the access log.
+
+### IDEA-269 :: One final test evaluation, pre-registered
+phase: 4 | effort: S | tags: leakage,process
+why: Repeated test evaluations are multiple testing and silently destroy your significance.
+do:  Write the configuration down, run once, and report whatever comes out.
+
+### IDEA-270 :: Keep a leak log
+phase: 1 | effort: S | tags: leakage,documentation
+why: You have already found one major leak, you will find more, and the patterns repeat across projects.
+do:  Append every leak found, how it was found and the test that now prevents it. Review it before each new feature family.
+
+# ============================================================================
+# CATEGORY C -- FEATURE ENGINEERING (271-330)
+# The arithmetic: roughly 40 base series x 8 transformations x 4 horizons is
+# about 1,280 features. You reach "thousands of variables" by systematic
+# transformation of a manageable base set, not by finding thousands of sources.
+# ============================================================================
+
+### IDEA-271 :: Feature registry where features are data, not code
+phase: 2 | effort: L | tags: features,architecture
+why: A thousand features written as a thousand functions is unmaintainable and untestable.
+do:  Each feature declares name, inputs, lookback, knowable-at offset, unit and transformation. The builder reads the registry.
+
+### IDEA-272 :: The eight canonical transformations
+phase: 2 | effort: M | tags: features,architecture
+why: Applied uniformly to every base series, this is where the feature count actually multiplies.
+do:  Implement level, change, z-score, cross-sectional rank, rolling mean, rolling std, momentum and acceleration as composable operators.
+
+### IDEA-273 :: Four canonical horizons
+phase: 2 | effort: S | tags: features,architecture
+why: Signal lives at different speeds and you do not know which in advance.
+do:  Apply every transformation at 5, 20, 60 and 120 bars. Document that neighbouring horizons are heavily correlated by construction.
+
+### IDEA-274 :: Yang-Zhang volatility as the default estimator
+phase: 2 | effort: M | tags: features,volatility
+why: It is up to 14 times more efficient than close-to-close, which on a 1,250-row problem is equivalent to multiplying sample size.
+do:  Implement with the k = 0.34 / (1.34 + (n+1)/(n-1)) weighting and use it wherever overnight gaps exist.
+
+### IDEA-275 :: Parkinson volatility
+phase: 2 | effort: S | tags: features,volatility
+why: About five times more efficient than close-to-close and trivially cheap from High and Low.
+do:  sigma^2 = (1 / (4 ln 2)) * ln(H/L)^2 per bar, then average over the window.
+
+### IDEA-276 :: Garman-Klass volatility
+phase: 2 | effort: S | tags: features,volatility
+why: About 7.4 times more efficient, using open and close as well as the range.
+do:  sigma^2 = 0.5 * ln(H/L)^2 - (2 ln 2 - 1) * ln(C/O)^2.
+
+### IDEA-277 :: Rogers-Satchell volatility
+phase: 2 | effort: S | tags: features,volatility
+why: The only classical range estimator that is unbiased under non-zero drift, which matters for trending names.
+do:  sigma^2 = u(u-c) + d(d-c) with u = ln(H/O), d = ln(L/O), c = ln(C/O).
+
+### IDEA-278 :: Volatility-of-volatility
+phase: 2 | effort: S | tags: features,volatility
+why: Regime transitions show up in the second moment of volatility before they show up in volatility itself.
+do:  Rolling standard deviation of the 20-day volatility series.
+
+### IDEA-279 :: Volatility term structure slope
+phase: 2 | effort: S | tags: features,volatility
+why: Short vol above long vol signals stress; the ratio is more informative than either level alone.
+do:  Feature vol_5 / vol_60 and vol_20 / vol_120 as ratios, not differences.
+
+### IDEA-280 :: Fractional differentiation for stationarity with memory
+phase: 2 | effort: L | tags: features,stationarity
+why: Integer differencing makes series stationary but destroys nearly all long-term memory.
+do:  Implement Lopez de Prado chapter 5 fracdiff; binary-search the minimum d that passes ADF at 95 percent; expect d in 0.3 to 0.7.
+
+### IDEA-281 :: ADF test on every feature before it ships
+phase: 2 | effort: M | tags: features,stationarity
+why: A non-stationary feature makes a model that works in one regime and fails in the next.
+do:  Run augmented Dickey-Fuller per feature per instrument; quarantine features that fail on more than 20 percent of names.
+
+### IDEA-282 :: Cross-sectional rank instead of raw level
+phase: 2 | effort: M | tags: features,panel
+why: Rank is scale-free, outlier-robust, and comparable across instruments with wildly different volatility.
+do:  For every feature emit a per-date cross-sectional percentile rank alongside the raw value.
+
+### IDEA-283 :: Sector-relative features
+phase: 2 | effort: M | tags: features,panel
+why: A bank up 2 percent when all banks are up 3 percent is actually weak, and the raw return hides that.
+do:  Subtract the sector median per date from every feature and emit the residual as its own feature.
+
+### IDEA-284 :: Beta-adjusted returns
+phase: 2 | effort: M | tags: features,panel
+why: Separating market exposure from stock-specific movement is the whole point of cross-sectional work.
+do:  Rolling regression against the benchmark; feature both the beta and the residual return.
+
+### IDEA-285 :: Idiosyncratic volatility
+phase: 2 | effort: M | tags: features,panel
+why: Residual volatility after removing market exposure is a well-documented cross-sectional signal.
+do:  Standard deviation of the residual from the beta regression, over the same window.
+
+### IDEA-286 :: Downside and upside volatility separately
+phase: 2 | effort: S | tags: features,volatility
+why: Investors price downside risk differently from upside, and the asymmetry is predictive.
+do:  Compute semi-deviation above and below zero separately and feature the ratio.
+
+### IDEA-287 :: Realised skewness and kurtosis
+phase: 2 | effort: S | tags: features,distribution
+why: Higher moments carry crash risk information that volatility alone does not.
+do:  Rolling third and fourth standardised moments over 60 and 120 bars.
+
+### IDEA-288 :: Maximum drawdown within the window
+phase: 2 | effort: S | tags: features,risk
+why: Path matters, and two instruments with equal return can have very different drawdown histories.
+do:  Rolling peak-to-trough decline over the window, as a fraction.
+
+### IDEA-289 :: Time under water
+phase: 2 | effort: S | tags: features,risk
+why: How long a name has been below its high is informationally distinct from how far below it is.
+do:  Count bars since the rolling maximum, normalised by window length.
+
+### IDEA-290 :: Distance from the 52-week high
+phase: 2 | effort: S | tags: features,momentum
+why: A long-documented anchoring effect in the cross-section of equity returns.
+do:  (price / rolling 252-day max) - 1, plus the same for the rolling minimum.
+
+### IDEA-291 :: Momentum with the most recent month skipped
+phase: 2 | effort: S | tags: features,momentum
+why: Classic 12-1 momentum skips the last month because short-term reversal contaminates it.
+do:  Return from t-252 to t-21, as its own feature separate from total 12-month return.
+
+### IDEA-292 :: Short-term reversal
+phase: 2 | effort: S | tags: features,momentum
+why: One-month reversal is one of the most robust cross-sectional effects and has the opposite sign to momentum.
+do:  Negative of the last 21-day return, ranked cross-sectionally.
+
+### IDEA-293 :: Momentum acceleration
+phase: 2 | effort: S | tags: features,momentum
+why: The change in momentum often leads the change in price.
+do:  First difference of the momentum feature over the same horizon.
+
+### IDEA-294 :: Amihud illiquidity
+phase: 2 | effort: M | tags: features,liquidity
+why: The standard liquidity proxy and a documented return predictor, computable from daily data alone.
+do:  Rolling mean of absolute return divided by dollar volume.
+
+### IDEA-295 :: Turnover and turnover trend
+phase: 2 | effort: S | tags: features,liquidity
+why: Changing turnover signals changing attention, and attention precedes price.
+do:  Volume divided by shares outstanding, plus its 20-day change.
+
+### IDEA-296 :: Volume-price correlation
+phase: 2 | effort: S | tags: features,microstructure
+why: Whether volume accompanies up moves or down moves distinguishes accumulation from distribution.
+do:  Rolling correlation of signed return against volume over 20 and 60 bars.
+
+### IDEA-297 :: Volume z-score against its own history
+phase: 2 | effort: S | tags: features,microstructure
+why: A volume spike is meaningful relative to that instrument's own baseline, not an absolute level.
+do:  (volume - rolling mean) / rolling std, over 20 and 60 bars.
+
+### IDEA-298 :: Dollar volume rather than share volume
+phase: 2 | effort: S | tags: features,liquidity
+why: Share counts are not comparable across instruments with different price levels.
+do:  Use price times volume everywhere a volume feature is built.
+
+### IDEA-299 :: Bid-ask spread proxy from daily data
+phase: 2 | effort: M | tags: features,microstructure,costs
+why: You lack quote data, but the effective spread can be estimated from daily highs and lows.
+do:  Implement the Corwin-Schultz high-low spread estimator and use it both as a feature and as a cost input.
+
+### IDEA-300 :: Close location within the bar
+phase: 2 | effort: S | tags: features,microstructure
+why: Closing near the high or the low signals end-of-day pressure and is distinct from the return itself.
+do:  (C - L) / (H - L), guarded against a zero range.
+
+### IDEA-301 :: Gap size and gap frequency
+phase: 2 | effort: S | tags: features,microstructure
+why: Overnight gaps carry information released outside trading hours.
+do:  ln(open / previous close), plus the rolling count of gaps exceeding one standard deviation.
+
+### IDEA-302 :: Candle body to range ratio
+phase: 2 | effort: S | tags: features,microstructure
+why: A small body in a wide range means indecision; you already compute this and it belongs in the registry.
+do:  abs(C - O) / (H - L), rolling mean over several horizons.
+
+### IDEA-303 :: Upper and lower wick asymmetry
+phase: 2 | effort: S | tags: features,microstructure
+why: Long lower wicks indicate buying support; the asymmetry is more informative than wick size.
+do:  (upper wick - lower wick) / range, rolling mean.
+
+### IDEA-304 :: Consecutive direction streak length
+phase: 2 | effort: S | tags: features,momentum
+why: Your generator already models streak decay, and the real streak distribution is a usable feature.
+do:  Current run length of same-direction bars, signed, plus its rolling maximum.
+
+### IDEA-305 :: Autocorrelation of own returns as a feature
+phase: 2 | effort: M | tags: features,timeseries
+why: Instruments differ in how mean-reverting they are, and that difference is itself predictive.
+do:  Rolling lag-1 and lag-5 autocorrelation over 120 bars.
+
+### IDEA-306 :: Hurst exponent
+phase: 3 | effort: M | tags: features,timeseries
+why: Distinguishes trending from mean-reverting regimes on a continuous scale.
+do:  Rescaled-range estimate over a rolling window; expect noisy values and smooth them.
+
+### IDEA-307 :: Variance ratio test statistic
+phase: 3 | effort: M | tags: features,timeseries
+why: A cleaner and better-understood trend-versus-reversion measure than Hurst.
+do:  Ratio of k-period variance to k times one-period variance, as a rolling feature.
+
+### IDEA-308 :: Correlation to the market, and its change
+phase: 2 | effort: M | tags: features,panel
+why: Correlations rise in crises, so rising correlation is itself a risk signal.
+do:  Rolling correlation to the benchmark over 60 bars, plus its 20-day change.
+
+### IDEA-309 :: Correlation to the nearest peers
+phase: 3 | effort: L | tags: features,panel
+why: Decoupling from peers is informative in both directions.
+do:  Mean correlation to the five most-correlated names in the same sector, recomputed monthly.
+
+### IDEA-310 :: Dispersion of the cross-section
+phase: 2 | effort: S | tags: features,panel,regime
+why: Cross-sectional dispersion is a regime indicator; low dispersion means factor bets pay little.
+do:  Per date, the standard deviation of returns across the panel, as a market-level feature attached to every row.
+
+### IDEA-311 :: Breadth
+phase: 2 | effort: S | tags: features,panel,regime
+why: The share of instruments above their own moving average is a classic market-health measure.
+do:  Per date, the fraction of the panel above its own 50-day and 200-day averages.
+
+### IDEA-312 :: Yield curve slope and its change
+phase: 2 | effort: M | tags: features,macro
+why: Term structure is among the most reliable macro predictors of the equity cycle.
+do:  10-year minus 2-year, 10-year minus 3-month, levels and 20-day changes, dated on release.
+
+### IDEA-313 :: Credit spread proxy
+phase: 2 | effort: M | tags: features,macro
+why: Credit stress leads equity stress reasonably consistently.
+do:  High-yield minus investment-grade ETF return spread as a free proxy where index data is unavailable.
+
+### IDEA-314 :: Macro surprise rather than macro level
+phase: 2 | effort: M | tags: features,macro
+why: Markets price the expectation, so only the surprise moves prices.
+do:  Actual minus consensus, standardised; where consensus is unavailable, use actual minus a simple forecast.
+
+### IDEA-315 :: Dollar index exposure
+phase: 2 | effort: S | tags: features,macro
+why: You measured TSLA at minus 0.32 correlation to DXY, which is a real and sizeable exposure.
+do:  Rolling beta of each instrument to the dollar index.
+
+### IDEA-316 :: Commodity exposure
+phase: 2 | effort: M | tags: features,macro
+why: Energy and materials names carry a commodity factor that price features alone will not capture.
+do:  Rolling beta to oil and to a broad commodity index.
+
+### IDEA-317 :: Calendar features, used with discipline
+phase: 2 | effort: S | tags: features,calendar
+why: Day-of-week and turn-of-month effects exist but are weak and heavily data-mined.
+do:  Encode cyclically with sine and cosine rather than as integers, and treat any strong result with suspicion.
+
+### IDEA-318 :: Days until and since earnings
+phase: 2 | effort: M | tags: features,events
+why: Volatility is strongly elevated around earnings in a highly predictable pattern.
+do:  Signed distance in trading days to the nearest scheduled earnings date, from a point-in-time calendar.
+
+### IDEA-319 :: Event exclusion windows
+phase: 3 | effort: S | tags: features,events
+why: Earnings-day returns are a different data-generating process and will dominate any model trained through them.
+do:  Flag and optionally exclude the earnings window; report results with and without it.
+
+### IDEA-320 :: Implied volatility level and skew
+phase: 3 | effort: L | tags: features,options
+why: Options markets contain forward-looking information that no price history can provide.
+do:  Where options data is affordable, feature at-the-money implied volatility, the 25-delta skew and the term slope.
+
+### IDEA-321 :: Implied minus realised volatility spread
+phase: 3 | effort: M | tags: features,options
+why: The variance risk premium is one of the better-documented predictors available.
+do:  Implied volatility minus trailing realised volatility, per instrument.
+
+### IDEA-322 :: Interaction features, chosen not generated
+phase: 3 | effort: M | tags: features,modelling
+why: All pairwise products of 1,000 features is 500,000 columns and guaranteed overfitting.
+do:  Hand-pick a few dozen economically motivated interactions, such as momentum times low volatility.
+
+### IDEA-323 :: Non-linear transforms of bounded oscillators
+phase: 2 | effort: S | tags: features,modelling
+why: RSI near 50 means something quite different from RSI near 20, and linear models cannot see that.
+do:  Feature distance from 50, squared distance, and an overbought or oversold indicator alongside the raw value.
+
+### IDEA-324 :: Feature clipping at training-fold percentiles
+phase: 2 | effort: S | tags: features,robustness
+why: One outlier row can dominate a linear model's entire fit.
+do:  Clip at the training-fold 1st and 99th percentiles; never at full-sample percentiles.
+
+### IDEA-325 :: Missing-value strategy per feature, declared
+phase: 2 | effort: M | tags: features,integrity
+why: Median imputation is wrong for some features and right for others, and silence hides the choice.
+do:  Declare the strategy in the registry; emit a was_missing indicator for every imputed field.
+
+### IDEA-326 :: Feature correlation clustering
+phase: 2 | effort: M | tags: features,selection
+why: Technical indicators are heavily collinear, and a thousand features may carry only fifty independent dimensions.
+do:  Hierarchical clustering on the correlation matrix; report the effective dimensionality rather than blindly dropping.
+
+### IDEA-327 :: Variance inflation factor screening
+phase: 2 | effort: M | tags: features,selection
+why: Severe multicollinearity destabilises linear coefficients and makes importances meaningless.
+do:  Compute VIF per feature; investigate everything above 10; prefer clustering to deletion.
+
+### IDEA-328 :: PCA as a diagnostic, not a replacement
+phase: 3 | effort: M | tags: features,selection
+why: Principal components are uninterpretable, but the eigenvalue spectrum tells you the true dimensionality.
+do:  Report how many components explain 95 percent of variance; that number is your real feature count.
+
+### IDEA-329 :: Feature stability across folds
+phase: 2 | effort: M | tags: features,validation
+why: A feature whose distribution shifts between folds will not generalise, however predictive it looks.
+do:  Compare per-fold means and standard deviations; flag features with large drift.
+
+### IDEA-330 :: Feature audit report
+phase: 2 | effort: M | tags: features,documentation
+why: Phase 2 ends with a gate requiring 800 audited features, and the audit is the deliverable.
+do:  Generate a report with count, coverage, missingness, leakage status, stationarity, stability and cluster membership.
+
+# ============================================================================
+# CATEGORY D -- LABELS AND TARGETS (331-355)
+# Measured: direction R2 is -0.0008 to +0.0054 across five instruments, while
+# magnitude R2 is +0.0022 to +0.0312. You are currently predicting the one
+# quantity that is not there. Changing the label is the cheapest large win.
+# ============================================================================
+
+### IDEA-331 :: Cross-sectional forward return rank as the primary target
+phase: 3 | effort: M | tags: labels,panel,critical
+why: Asking which instrument beats which cancels the market factor, which is the part that is a martingale.
+do:  Label = percentile rank of forward return within the date's cross-section. Score with information coefficient, not accuracy.
+
+### IDEA-332 :: Forward realised volatility as a second target
+phase: 3 | effort: M | tags: labels,volatility
+why: Magnitude is measurably predictable where direction is not, on all five instruments tested.
+do:  Add future_vol_pct = std of forward-window bar returns in build_forecast_dataset, next to future_return_pct.
+
+### IDEA-333 :: Predict magnitude as a number, never as a class
+phase: 3 | effort: S | tags: labels,volatility,critical
+why: SAP magnitude R2 of 0.0312 collapsed to a 50.7 percent coin flip when binarised against a rolling median.
+do:  Use a regressor scored by R2. Thresholding a continuous target throws the signal away.
+
+### IDEA-334 :: Beat trailing volatility, not the mean
+phase: 1 | effort: M | tags: labels,volatility,gate
+why: R2 against the training mean is a soft benchmark because volatility is persistent; trailing vol already captures most of it.
+do:  Re-run the magnitude test with trailing 20-day volatility as the competing prediction. This is Gate 1a and it decides the project shape.
+
+### IDEA-335 :: Triple-barrier labelling
+phase: 3 | effort: L | tags: labels,methodology
+why: A fixed-horizon label ignores that a position would have been stopped out or taken profit long before the horizon.
+do:  Implement Lopez de Prado chapter 3: upper profit barrier, lower stop barrier, vertical time barrier, with barriers scaled by volatility.
+
+### IDEA-336 :: Volatility-scaled barriers
+phase: 3 | effort: M | tags: labels,methodology
+why: A fixed 2 percent barrier is trivial for TSLA at 32.8 percent annualised volatility and unreachable for EUR/GBP at 2.6 percent.
+do:  Set barriers as multiples of each instrument's trailing volatility, not as absolute percentages.
+
+### IDEA-337 :: Meta-labelling
+phase: 3 | effort: L | tags: labels,methodology
+why: Separating "which direction" from "how confident" lets a second model size positions, often the larger win.
+do:  Primary model emits a side; secondary model predicts whether that side is correct; size by the secondary probability.
+
+### IDEA-338 :: Horizon sweep
+phase: 3 | effort: M | tags: labels,methodology
+why: Daily is the hardest horizon and the one you have been attempting; monthly is materially easier.
+do:  Evaluate the same features at 1, 5, 20 and 60-day horizons and report the information coefficient for each.
+
+### IDEA-339 :: Longer horizons reduce the cost burden
+phase: 3 | effort: S | tags: labels,costs
+why: Measured, a no-skill signal lost 0.87 Sharpe to three basis points at 26.9 round trips per year.
+do:  Prefer the longest horizon that retains signal, because turnover falls roughly in proportion to horizon.
+
+### IDEA-340 :: Risk-adjusted forward return as the label
+phase: 3 | effort: M | tags: labels,risk
+why: Predicting return alone pushes the model toward the highest-volatility names rather than the best ones.
+do:  Label = forward return divided by trailing volatility, so the target is already risk-adjusted.
+
+### IDEA-341 :: Sector-neutral labels
+phase: 3 | effort: M | tags: labels,panel
+why: Without neutralisation the model learns to pick sectors, which is a far easier and far less valuable bet.
+do:  Subtract the sector mean forward return per date before ranking.
+
+### IDEA-342 :: Market-neutral labels
+phase: 3 | effort: S | tags: labels,panel
+why: A model that only predicts the market factor will look good and be untradable as a long-short.
+do:  Subtract the cross-sectional mean forward return per date.
+
+### IDEA-343 :: Winsorise the label, not only the features
+phase: 3 | effort: S | tags: labels,robustness
+why: One name up 400 percent on a takeover dominates every squared-error loss in the panel.
+do:  Clip forward returns at the 1st and 99th cross-sectional percentiles per date.
+
+### IDEA-344 :: Label the tails separately
+phase: 4 | effort: M | tags: labels,risk
+why: Predicting which names crash is a different and more valuable problem than predicting average returns.
+do:  Build a binary label for the bottom 5 percent of forward returns and model it separately.
+
+### IDEA-345 :: Multi-task learning across horizons
+phase: 3 | effort: L | tags: labels,modelling
+why: Related targets regularise each other and often improve all of them.
+do:  Predict 5, 20 and 60-day forward rank jointly with shared representation.
+
+### IDEA-346 :: Sign and magnitude as separate heads
+phase: 3 | effort: M | tags: labels,modelling
+why: Measured, these have completely different predictability; forcing one model to do both wastes capacity on the impossible half.
+do:  One model for forward volatility, one for forward rank, combined only at the sizing stage.
+
+### IDEA-347 :: Label noise estimation
+phase: 4 | effort: M | tags: labels,validation
+why: If the label is 95 percent noise, no model can exceed a low ceiling, and knowing the ceiling prevents wasted months.
+do:  Estimate the irreducible error by fitting the same target on shuffled features; the gap is your maximum achievable R2.
+
+### IDEA-348 :: Forward-looking turnover as a target
+phase: 4 | effort: M | tags: labels,costs
+why: Knowing which positions will need rebalancing lets you avoid entering them in the first place.
+do:  Predict the expected holding period and penalise short-lived signals at the sizing stage.
+
+### IDEA-349 :: Drawdown as a label
+phase: 4 | effort: M | tags: labels,risk
+why: Forward maximum drawdown is more decision-relevant than forward return for sizing.
+do:  Label the maximum peak-to-trough decline over the forward window and model it as a regression.
+
+### IDEA-350 :: Regime label from unsupervised clustering
+phase: 3 | effort: L | tags: labels,regime
+why: A model that knows which regime it is in can specialise, and regime is observable without future data.
+do:  Cluster market-level features with a hidden Markov model or k-means; feature the regime, do not predict it.
+
+### IDEA-351 :: Avoid overlapping labels where possible
+phase: 3 | effort: M | tags: labels,validation
+why: Overlap is the core reason your confidence intervals would be too narrow by roughly a factor of three.
+do:  Either sample non-overlapping windows or apply uniqueness weights; state which and why.
+
+### IDEA-352 :: Report the label base rate always
+phase: 3 | effort: S | tags: labels,reporting
+why: 92 percent accuracy on a 92 percent base rate is zero skill, and the SAP 3m set had a 0.697 base rate.
+do:  Print the majority-class share next to every accuracy figure, permanently.
+
+### IDEA-353 :: Label stability across regimes
+phase: 4 | effort: M | tags: labels,validation
+why: A label whose distribution shifts between 2019 and 2022 makes a model that silently stops working.
+do:  Plot the label distribution by year and by volatility regime.
+
+### IDEA-354 :: Economic significance alongside statistical significance
+phase: 4 | effort: S | tags: labels,reporting
+why: An information coefficient of 0.02 can be highly significant and still unprofitable after costs.
+do:  Translate every IC into an expected net Sharpe at your real cost assumption before reporting it.
+
+### IDEA-355 :: Keep the direction label as a diagnostic only
+phase: 3 | effort: S | tags: labels,process
+why: It is the hardest target and the one you measured as unreachable, but it is a useful canary.
+do:  Continue computing direction accuracy; if it ever exceeds 0.58 out of sample, go looking for the bug.
+
+# ============================================================================
+# CATEGORY E -- MODELS (356-385)
+# Deliberately late in the plan. Models are the easy part. The ordering
+# data -> features -> models is the opposite of the instinctive one and is
+# the correct one.
+# ============================================================================
+
+### IDEA-356 :: Ridge as the serious baseline
+phase: 3 | effort: S | tags: models,linear
+why: With p around 1,000 and correlated features, L2 regularisation is strong, fast, stable and interpretable.
+do:  Ridge with alpha tuned on a purged validation fold. In the published literature linear models are frequently competitive.
+
+### IDEA-357 :: Elastic Net for sparse selection
+phase: 3 | effort: M | tags: models,linear
+why: Combines L1 selection with L2 stability, which suits heavily correlated feature clusters.
+do:  Tune the l1_ratio alongside alpha; inspect which clusters survive.
+
+### IDEA-358 :: Gradient boosting with early stopping on a purged fold
+phase: 3 | effort: M | tags: models,trees
+why: XGBoost and LightGBM are now installed and are the strongest tabular default.
+do:  Early stopping must use a purged validation fold, not a random one, or you have reintroduced leakage.
+
+### IDEA-359 :: Shallow trees only
+phase: 3 | effort: S | tags: models,trees,regularisation
+why: Depth 3 to 5 is usually right for noisy financial data; your random forest hit 0.918 train against 0.500 out-of-bag.
+do:  Cap max_depth, raise min_samples_leaf, and treat a large train-test gap as a bug rather than a tuning opportunity.
+
+### IDEA-360 :: Monotonic constraints where theory demands them
+phase: 3 | effort: M | tags: models,trees
+why: If you believe higher momentum should never reduce predicted return, enforce it and gain stability for free.
+do:  Use the monotone_constraints parameter in XGBoost and LightGBM for features with a known sign.
+
+### IDEA-361 :: Small neural network with heavy regularisation
+phase: 3 | effort: L | tags: models,neural
+why: Gu, Kelly and Xiu found neural networks best, by a small margin, with vastly more data than you have.
+do:  Two or three hidden layers at most, dropout, weight decay, early stopping. Expect it to tie with Ridge.
+
+### IDEA-362 :: Rank-average ensemble
+phase: 3 | effort: S | tags: models,ensemble
+why: Ensembles beat individual models with remarkable consistency in this domain, and rank-averaging is scale-free.
+do:  Average the cross-sectional ranks of each model's predictions rather than the raw predictions.
+
+### IDEA-363 :: Ensemble across seeds, not only across model families
+phase: 3 | effort: S | tags: models,ensemble
+why: Seed variance in tree models is larger than most people assume and averaging it away is nearly free.
+do:  Train five seeds per family and average; report the spread across seeds as an uncertainty estimate.
+
+### IDEA-364 :: Train one model across the whole panel, not one per instrument
+phase: 3 | effort: M | tags: models,panel,critical
+why: One model per instrument returns you to n=1,250 and destroys the entire point of building a panel.
+do:  Pool all instruments into one training set with instrument characteristics as features.
+
+### IDEA-365 :: Instrument fixed effects as features
+phase: 3 | effort: S | tags: models,panel
+why: Pooling assumes instruments are exchangeable, which they are not.
+do:  Include sector, size bucket, volatility bucket and liquidity bucket as categorical features.
+
+### IDEA-366 :: Expanding window rather than rolling window training
+phase: 3 | effort: S | tags: models,validation
+why: More data usually wins in a low signal-to-noise regime, and discarding old data discards regimes.
+do:  Compare expanding against rolling empirically; do not assume. Report both.
+
+### IDEA-367 :: Retrain cadence sweep
+phase: 3 | effort: M | tags: models,production
+why: Retraining too often fits noise, too rarely misses drift, and the optimum is empirical.
+do:  Test monthly, quarterly and annual retraining and report the information coefficient for each.
+
+### IDEA-368 :: Warm-start incremental updates
+phase: 5 | effort: M | tags: models,production
+why: Full retraining on 600,000 rows is slow and most of the data has not changed.
+do:  Use warm_start or incremental boosting rounds; validate that incremental matches full retraining on a sample.
+
+### IDEA-369 :: Probability calibration
+phase: 3 | effort: M | tags: models,calibration
+why: Raw forest probabilities are pushed away from 0 and 1, so a stated 70 percent is not a real 70 percent.
+do:  CalibratedClassifierCV with isotonic regression, fitted on a purged fold, scored by Brier.
+
+### IDEA-370 :: Report the Brier score, not only accuracy
+phase: 3 | effort: S | tags: models,calibration
+why: Brier measures discrimination and calibration together, which is what a sizing decision actually needs.
+do:  Add Brier to the standard model comparison table alongside the information coefficient.
+
+### IDEA-371 :: Conformal prediction intervals
+phase: 4 | effort: L | tags: models,uncertainty
+why: A point forecast with no interval cannot support a sizing decision.
+do:  Split-conformal intervals on a held-out calibration fold, giving distribution-free coverage guarantees.
+
+### IDEA-372 :: Quantile regression instead of mean regression
+phase: 3 | effort: M | tags: models,uncertainty
+why: The conditional median is more robust than the mean on fat-tailed targets, and the quantile spread is a risk estimate.
+do:  Train at the 10th, 50th and 90th quantiles using pinball loss.
+
+### IDEA-373 :: Huber loss for robustness
+phase: 3 | effort: S | tags: models,robustness
+why: Squared error gives extreme returns enormous leverage over the fit.
+do:  Use Huber or quantile loss for any regression target on raw returns.
+
+### IDEA-374 :: Sample weights by uniqueness and by recency
+phase: 3 | effort: M | tags: models,validation
+why: Overlapping labels overweight some periods and old regimes may deserve less weight.
+do:  Combine uniqueness weights with an exponential recency decay; tune the half-life as a hyperparameter.
+
+### IDEA-375 :: Keep your accuracy-weighted sample scheme, repurposed
+phase: 3 | effort: S | tags: models,legacy
+why: sample_weights() already weights by accuracy_index and the mechanism is sound even though the use case changed.
+do:  Repoint it at uniqueness and recency weights rather than simulation accuracy.
+
+### IDEA-376 :: SHAP on the winning model only
+phase: 3 | effort: M | tags: models,interpretability
+why: Mean decrease in impurity over-weights high-cardinality features and is actively misleading.
+do:  TreeSHAP on the frozen model; if the important features are economically incoherent, suspect a leak.
+
+### IDEA-377 :: Permutation importance with a purged scheme
+phase: 3 | effort: M | tags: models,interpretability
+why: Permutation importance measured on leaky folds reproduces the leak as apparent importance.
+do:  Permute within the purged test fold only.
+
+### IDEA-378 :: Feature family ablation
+phase: 4 | effort: M | tags: models,interpretability
+why: Removing a family and seeing no change proves those features were decoration.
+do:  Retrain with each family removed in turn; report the information coefficient delta per family.
+
+### IDEA-379 :: Compare against a random-feature control
+phase: 3 | effort: S | tags: models,validation
+why: Adding 50 pure noise columns and seeing their importance tells you your importance floor.
+do:  Inject noise features; any real feature ranked below the best noise feature is not doing work.
+
+### IDEA-380 :: Hyperparameter search with Optuna, budgeted
+phase: 3 | effort: M | tags: models,tuning
+why: Grid search wastes most of its evaluations, but an unbounded search is multiple testing at scale.
+do:  Use Bayesian search with a hard trial budget, and log every trial to trials.csv.
+
+### IDEA-381 :: Count every hyperparameter trial as a trial
+phase: 3 | effort: S | tags: models,validation,critical
+why: The deflated Sharpe calculation in Phase 4 needs an honest count, and tuning runs are the bulk of it.
+do:  Append every configuration evaluated, automatically, from inside the training loop.
+
+### IDEA-382 :: Freeze the model before the validation gauntlet
+phase: 3 | effort: S | tags: models,process
+why: Tuning after seeing validation results invalidates the validation.
+do:  Pick one family, write down the configuration, and change nothing during Phase 4.
+
+### IDEA-383 :: Linear model as the interpretability anchor
+phase: 3 | effort: S | tags: models,interpretability
+why: If the complex model beats Ridge by a wide margin, that is suspicious rather than exciting.
+do:  Always report Ridge alongside the winner; investigate large gaps rather than celebrating them.
+
+### IDEA-384 :: Model persistence with full provenance
+phase: 3 | effort: S | tags: models,reproducibility
+why: A .pkl with no metadata is unreproducible and unauditable.
+do:  Save model, feature list, training date range, seed, config hash and git commit together in one directory.
+
+### IDEA-385 :: Prediction distribution sanity check
+phase: 3 | effort: S | tags: models,monitoring
+why: A model predicting the same value for every instrument has collapsed and accuracy will not reveal it.
+do:  Assert the cross-sectional standard deviation of predictions exceeds a floor on every inference run.
+
+# ============================================================================
+# CATEGORY F -- VALIDATION AND STATISTICS (386-420)
+# This is the category that separates a student project from a professional
+# one, and the one beginners skip entirely. Measured: with 640 test rows you
+# cannot detect any edge below 55.5 percent, so knowing your floor is step one.
+# ============================================================================
+
+### IDEA-386 :: Compute the minimum detectable effect before every experiment
+phase: 1 | effort: S | tags: validation,critical
+why: An experiment that cannot detect the effect it is looking for is wasted time, and you will not notice.
+do:  MDA = 0.5 + 1.4 / sqrt(n) for classification. Print it at the top of every result.
+
+### IDEA-387 :: Plan sample sizes backwards from the target edge
+phase: 1 | effort: S | tags: validation
+why: n = (1.96 + 0.84)^2 * 0.25 / edge^2. Detecting 52 percent needs 4,900 rows, which is 19.4 years on one instrument.
+do:  State the edge you are hunting, compute the rows required, and check you have them before starting.
+
+### IDEA-388 :: Combinatorial purged cross-validation
+phase: 4 | effort: L | tags: validation,methodology
+why: Walk-forward gives one number and you cannot tell whether it is typical or lucky.
+do:  N=6 groups, k=2 test groups, 15 combinations, purge and embargo around each. Report the distribution of Sharpe, not a point.
+
+### IDEA-389 :: Report the median and spread, never the maximum
+phase: 4 | effort: S | tags: validation,reporting
+why: A strategy with Sharpe 1.5 on one CPCV path and -0.3 on another is a coin flip you got lucky on once.
+do:  Report median, 10th and 90th percentile across paths. The maximum is never the headline.
+
+### IDEA-390 :: Deflated Sharpe ratio
+phase: 4 | effort: M | tags: validation,critical
+why: With enough configurations tried, an impressive Sharpe is the expected outcome of noise.
+do:  Implement Bailey and Lopez de Prado DSR using your honest trial count, plus return skewness and kurtosis.
+
+### IDEA-391 :: Probability of backtest overfitting
+phase: 4 | effort: L | tags: validation
+why: PBO above 0.5 means your selection procedure is worse than picking at random.
+do:  Combinatorially symmetric cross-validation: rank the in-sample best configuration out of sample, repeatedly.
+
+### IDEA-392 :: Maintain trials.csv as an append-only log
+phase: 1 | effort: S | tags: validation,critical
+why: You cannot deflate a Sharpe without a trial count, and reconstructing one from memory is not honest.
+do:  One row per configuration ever evaluated, written automatically from the training loop. Never edit or delete.
+
+### IDEA-393 :: Count seed changes as trials
+phase: 3 | effort: S | tags: validation,process
+why: Re-running with a new seed and keeping the better result is multiple testing, and it feels innocent.
+do:  Log the seed as part of the configuration hash so a seed change creates a new trial row.
+
+### IDEA-394 :: Harvey-Liu-Zhu significance bar
+phase: 4 | effort: S | tags: validation,reporting
+why: Given hundreds of published factors, a new one needs roughly t above 3.0 rather than the conventional 2.0.
+do:  Use 3.0 as the bar in the write-up and justify it by citing the multiple-testing argument.
+
+### IDEA-395 :: Pre-register every experiment
+phase: 1 | effort: S | tags: validation,process
+why: Writing the hypothesis and success criterion before running is the cheapest protection against post-hoc rationalisation.
+do:  One markdown file per experiment, created before execution, including your predicted outcome.
+
+### IDEA-396 :: Predict the result before you look
+phase: 1 | effort: S | tags: validation,process
+why: Recording your expectation calibrates your judgement faster than any individual result does.
+do:  A "prediction before running" line in every pre-registration. Review your calibration quarterly.
+
+### IDEA-397 :: Adversarial validation between train and live
+phase: 4 | effort: M | tags: validation,drift
+why: AUC above 0.55 means the model is extrapolating and your validation does not describe production.
+do:  You already have adversarial_validation in ml_model.py; point it at train versus recent data and run it monthly.
+
+### IDEA-398 :: Regime-split performance reporting
+phase: 4 | effort: M | tags: validation,regime
+why: Volatility is at the 3rd to 17th percentile today, so a model validated now is validated in one regime only.
+do:  Report the information coefficient separately in low, medium and high volatility terciles.
+
+### IDEA-399 :: Performance by calendar year
+phase: 4 | effort: S | tags: validation,reporting
+why: A strategy carried entirely by one year is not a strategy.
+do:  Table of annual information coefficient and net Sharpe; highlight the worst year prominently.
+
+### IDEA-400 :: Crisis-period stress tests
+phase: 4 | effort: M | tags: validation,risk
+why: Correlations converge and liquidity vanishes exactly when you most need the model to work.
+do:  Isolate March 2020 and 2022 and report performance through them specifically.
+
+### IDEA-401 :: Hyperparameter sensitivity surface
+phase: 4 | effort: M | tags: validation,robustness
+why: A result that exists only at one setting is noise dressed as a discovery.
+do:  Perturb every hyperparameter by plus and minus 50 percent; the result should degrade smoothly, not collapse.
+
+### IDEA-402 :: Start-date sensitivity
+phase: 4 | effort: S | tags: validation,robustness
+why: Shifting the backtest start by three months should not change the conclusion.
+do:  Re-run from several start dates and report the spread.
+
+### IDEA-403 :: Universe sensitivity
+phase: 4 | effort: M | tags: validation,robustness
+why: If the result depends on including the 400th most liquid name, it depends on the names you cannot trade cheaply.
+do:  Re-run on the top 100, 200 and 500 by liquidity.
+
+### IDEA-404 :: Transaction-cost sensitivity curve
+phase: 4 | effort: S | tags: validation,costs
+why: Measured, net Sharpe fell from -0.18 to -1.05 as costs went from 0 to 3 basis points.
+do:  Plot net Sharpe against assumed cost from 0 to 20 basis points and find the break-even cost.
+
+### IDEA-405 :: Report the break-even cost as a headline number
+phase: 4 | effort: S | tags: validation,costs,reporting
+why: "This works below 4 basis points" is a far more honest and useful claim than a single Sharpe.
+do:  Make break-even cost a standard row in every results table.
+
+### IDEA-406 :: Benchmark against buy and hold
+phase: 1 | effort: S | tags: validation,baselines
+why: Many strategies underperform simply holding the index, and that comparison is rarely shown.
+do:  Include equal-weight buy and hold in every performance table, net of costs.
+
+### IDEA-407 :: Benchmark against a five-factor linear model
+phase: 1 | effort: M | tags: validation,baselines,critical
+why: A thousand-variable model that does not beat five classic factors has earned nothing.
+do:  Fit market, size, value, momentum and quality; report your model's alpha against it.
+
+### IDEA-408 :: Benchmark against random predictions
+phase: 1 | effort: S | tags: validation,baselines
+why: Random predictions with the same turnover reveal how much of your result is sizing rather than signal.
+do:  Run the full backtest with shuffled predictions and report the distribution of outcomes.
+
+### IDEA-409 :: Bootstrap confidence intervals on every metric
+phase: 4 | effort: M | tags: validation,statistics
+why: A Sharpe quoted without an interval is not a measurement.
+do:  Block bootstrap preserving autocorrelation; report the 5th and 95th percentiles.
+
+### IDEA-410 :: Block bootstrap, never IID bootstrap
+phase: 4 | effort: M | tags: validation,statistics
+why: IID resampling destroys serial correlation and produces intervals far too narrow.
+do:  Use stationary or circular block bootstrap with block length tied to the autocorrelation decay.
+
+### IDEA-411 :: Report effective sample size
+phase: 4 | effort: M | tags: validation,statistics
+why: 600,000 panel rows are not 600,000 independent observations because instruments correlate within a date.
+do:  Estimate effective n from the cross-sectional correlation structure and use it in every interval.
+
+### IDEA-412 :: Cluster standard errors by date
+phase: 4 | effort: M | tags: validation,statistics
+why: All instruments on one date share the market shock, so treating them as independent overstates precision badly.
+do:  Cluster by date when computing standard errors on any panel regression.
+
+### IDEA-413 :: White reality check or stepwise multiple testing correction
+phase: 4 | effort: L | tags: validation,statistics
+why: Testing many strategies needs a family-wise correction, not a per-test p-value.
+do:  Implement a bootstrap reality check across the full set of strategies tried.
+
+### IDEA-414 :: Separate validation and test sets, strictly
+phase: 3 | effort: S | tags: validation,process
+why: Tuning on test converts it into validation and leaves you with no honest estimate at all.
+do:  Three-way split with a test set accessed exactly once, at the end, with the access logged.
+
+### IDEA-415 :: Out-of-sample on an untouched asset class
+phase: 4 | effort: M | tags: validation,generalisation
+why: The strongest evidence that a factor is real is that it appears somewhere it was never fitted.
+do:  Hold out crypto or a foreign market entirely; test once at the very end.
+
+### IDEA-416 :: Report every failed experiment
+phase: 4 | effort: S | tags: validation,reporting
+why: A write-up showing only successes is evidence of selection, and examiners know it.
+do:  A failed-experiments appendix in the dissertation. It strengthens the work rather than weakening it.
+
+### IDEA-417 :: Null-result dissertation plan
+phase: 4 | effort: S | tags: validation,process
+why: If deflated Sharpe is zero or negative, that is a publishable, defensible and genuinely strong finding.
+do:  Draft the null-result version of the write-up in advance so the outcome does not dictate your effort.
+
+### IDEA-418 :: Reproduce one published result exactly
+phase: 2 | effort: L | tags: validation,learning
+why: Reproducing momentum or low-volatility end to end validates your entire pipeline against a known answer.
+do:  Pick a simple documented factor, reproduce its published behaviour, and only then trust your infrastructure.
+
+### IDEA-419 :: Keep a results ledger
+phase: 1 | effort: S | tags: validation,process
+why: Memory reconstructs a cleaner history than actually happened, every time.
+do:  Append every headline number with its date, configuration hash and trial count. Never overwrite a row.
+
+### IDEA-420 :: Quarterly honest review
+phase: 1 | effort: S | tags: validation,process
+why: Drift into enjoyable work that does not advance the gate is the most likely silent failure mode.
+do:  Every quarter, answer in writing: what did I measure, what failed, how many trials total, am I still on plan.
+
+# ============================================================================
+# CATEGORY G -- COSTS, SIZING AND PORTFOLIO (421-445)
+# Measured: a skill-free signal went from -0.18 to -1.05 net Sharpe as costs
+# rose from 0 to 3 basis points. Accuracy and profit are different questions.
+# ============================================================================
+
+### IDEA-421 :: Model costs from day one, not at the end
+phase: 1 | effort: M | tags: costs,critical
+why: A strategy designed without costs optimises for turnover it cannot afford.
+do:  Every backtest reports gross and net side by side, from the first one you ever run.
+
+### IDEA-422 :: Use your broker's real spread
+phase: 4 | effort: S | tags: costs
+why: The 1 basis point in the example code is an assumption, not your cost.
+do:  Replace it with quoted spreads per instrument class; single stocks are far more expensive than major FX.
+
+### IDEA-423 :: Square-root market impact model
+phase: 4 | effort: M | tags: costs,capacity
+why: Impact grows roughly with the square root of participation, so large trades cost disproportionately more.
+do:  impact = k * spread * sqrt(order size / average daily volume), with k calibrated conservatively.
+
+### IDEA-424 :: Participation rate cap
+phase: 4 | effort: S | tags: costs,capacity
+why: A backtest trading 30 percent of a day's volume is fiction.
+do:  Cap position changes at a few percent of average daily volume and report trades the cap rejected.
+
+### IDEA-425 :: Capacity curve
+phase: 4 | effort: M | tags: costs,capacity
+why: Every strategy has a size at which its own trading destroys its edge.
+do:  Plot net Sharpe against assumed capital deployed; report the capital at which Sharpe halves.
+
+### IDEA-426 :: Borrow cost and shorting constraints
+phase: 4 | effort: M | tags: costs,shorting
+why: A long-short backtest that shorts hard-to-borrow names for free is not implementable.
+do:  Apply a borrow fee, and exclude names that are not reliably shortable.
+
+### IDEA-427 :: Volatility targeting for position size
+phase: 4 | effort: M | tags: sizing
+why: Fixed position sizes mean your risk swings with the market, and volatility is at a 3rd percentile today.
+do:  size = min(target_vol / forecast_vol, max_leverage). Note this levers up in calm markets, so the cap is a real risk control.
+
+### IDEA-428 :: Half-Kelly, not full Kelly
+phase: 4 | effort: S | tags: sizing,risk
+why: Full Kelly is optimal only with perfectly known probabilities, which you never have.
+do:  Multiply the Kelly fraction by 0.5 or less, and document the choice.
+
+### IDEA-429 :: Hard leverage cap independent of the model
+phase: 4 | effort: S | tags: sizing,risk,critical
+why: A model error that doubles position size is survivable; one that multiplies it tenfold is not.
+do:  An absolute cap applied after all sizing logic, as a last line of defence.
+
+### IDEA-430 :: Position limits per instrument
+phase: 4 | effort: S | tags: sizing,risk
+why: Concentration risk is how a single bad name ends a portfolio.
+do:  Cap any single position at a few percent of gross exposure.
+
+### IDEA-431 :: Sector exposure limits
+phase: 4 | effort: M | tags: sizing,risk
+why: An unconstrained cross-sectional model will happily go 60 percent long one sector.
+do:  Neutralise or cap sector exposure, and report realised sector tilts.
+
+### IDEA-432 :: Correlation-aware sizing
+phase: 4 | effort: M | tags: sizing,risk,critical
+why: Measured, GBP/USD and EUR/USD correlate at 0.85, so sizing them independently roughly doubles true exposure.
+do:  Size on the covariance matrix, not on individual volatilities.
+
+### IDEA-433 :: Shrinkage covariance estimation
+phase: 4 | effort: M | tags: sizing,statistics
+why: Sample covariance is badly conditioned and often not positive-definite when instruments outnumber observations.
+do:  Ledoit-Wolf shrinkage toward a structured target; verify positive-definiteness before inverting.
+
+### IDEA-434 :: Turnover penalty inside the optimiser
+phase: 4 | effort: M | tags: sizing,costs
+why: Optimising expected return alone produces a portfolio that churns itself to death.
+do:  Add a transaction-cost term to the objective so the optimiser trades only when the edge exceeds the cost.
+
+### IDEA-435 :: No-trade band
+phase: 4 | effort: S | tags: sizing,costs
+why: Rebalancing to a target every day pays the spread for trivial adjustments.
+do:  Only trade when the gap between current and target weight exceeds a threshold.
+
+### IDEA-436 :: Trade scheduling across the day
+phase: 5 | effort: M | tags: costs,execution
+why: Executing everything at the open pays the widest spread of the session.
+do:  Spread execution across a window; model the resulting slippage honestly.
+
+### IDEA-437 :: Stop-loss discipline, evaluated empirically
+phase: 4 | effort: M | tags: risk,sizing
+why: Stops reduce drawdown and also cut winners; whether they help is an empirical question, not a belief.
+do:  Backtest with and without, at several volatility multiples, and report both.
+
+### IDEA-438 :: Maximum drawdown circuit breaker
+phase: 5 | effort: S | tags: risk,production
+why: A model that has stopped working needs to be stopped before it does serious damage.
+do:  Halt trading automatically at a pre-set drawdown; require a manual, documented restart.
+
+### IDEA-439 :: Report Calmar alongside Sharpe
+phase: 4 | effort: S | tags: reporting,risk
+why: Sharpe 1.0 with a 40 percent drawdown is unusable in practice regardless of the Sharpe.
+do:  Calmar = annual return divided by maximum drawdown, in every results table.
+
+### IDEA-440 :: Report the worst month and worst quarter
+phase: 4 | effort: S | tags: reporting,risk
+why: Investors and examiners both ask this immediately, and it is rarely in the table.
+do:  Add worst month, worst quarter and longest drawdown duration as standard rows.
+
+### IDEA-441 :: Underwater curve plot
+phase: 4 | effort: S | tags: reporting,risk
+why: The drawdown path communicates risk far better than a single maximum figure.
+do:  Plot the drawdown series over the whole backtest alongside the equity curve.
+
+### IDEA-442 :: Long-short balance reporting
+phase: 4 | effort: S | tags: reporting,panel
+why: A nominally market-neutral strategy that runs 70 percent net long is a directional bet in disguise.
+do:  Report gross and net exposure over time, with a target band.
+
+### IDEA-443 :: Expected shortfall, not only value at risk
+phase: 4 | effort: M | tags: risk,statistics
+why: VaR says nothing about how bad the tail is beyond the threshold, which is the part that matters.
+do:  Report conditional VaR at 95 and 99 percent, computed empirically rather than from a normal assumption.
+
+### IDEA-444 :: Factor exposure attribution
+phase: 4 | effort: M | tags: reporting,panel
+why: If your returns are explained by momentum exposure, you have rebuilt momentum expensively.
+do:  Regress strategy returns on standard factors; report the residual alpha and its t-statistic.
+
+### IDEA-445 :: Paper-trade before anything else
+phase: 5 | effort: M | tags: risk,production,critical
+why: It is the only test that cannot be leaked, and it catches the operational bugs backtests never show.
+do:  Locked, timestamped prediction log running for months. It will not be conclusive quickly, and that is expected.
+
+# ============================================================================
+# CATEGORY H -- INFRASTRUCTURE, PERFORMANCE AND ENGINEERING (446-470)
+# Measured: a 50,000-run job died after 22 minutes leaving a zero-byte log and
+# no model, and processed_bars.csv reached 1.6 GB. Infrastructure is not
+# optional polish; it is the difference between finishing and not finishing.
+# ============================================================================
+
+### IDEA-446 :: Put the Learn folder under version control today
+phase: 0 | effort: S | tags: infra,critical
+why: git ls-files returned nothing for Learn on 2026-10-20; three files totalling 341 KB were untracked and one command from gone.
+do:  git add Learn/ and commit. Check for other untracked directories holding work you cannot regenerate.
+
+### IDEA-447 :: Pre-commit hooks
+phase: 1 | effort: M | tags: infra,quality
+why: A check that runs only when you remember is a check that does not run.
+do:  ruff, mypy, the leakage canary and a secrets scan, all on commit.
+
+### IDEA-448 :: Continuous integration on every push
+phase: 1 | effort: M | tags: infra,quality
+why: Tests that pass locally and fail elsewhere waste your time at the worst moments.
+do:  GitHub Actions running the full suite plus the synthetic-panel end-to-end test.
+
+### IDEA-449 :: mypy strict mode
+phase: 1 | effort: L | tags: infra,quality
+why: Silent type coercion corrupts financial calculations without raising anything.
+do:  Enable disallow_untyped_defs and warn_redundant_casts; clear the baseline incrementally, module by module.
+
+### IDEA-450 :: Immutable frozen dataclasses for trade and config records
+phase: 1 | effort: M | tags: infra,quality
+why: Dict-typed records allow silent typos that create new keys rather than raising.
+do:  Replace dict[str, Any] with frozen dataclasses carrying explicit float fields.
+
+### IDEA-451 :: Pandera schemas at every stage boundary
+phase: 1 | effort: M | tags: infra,integrity
+why: Silent column renames and dtype downcasts are the most common cause of broken pipelines.
+do:  Declare a schema per stage; validate on entry and exit; fail loudly on mismatch.
+
+### IDEA-452 :: Structured JSON logging
+phase: 1 | effort: M | tags: infra,observability
+why: Grepping prose logs does not scale, and you cannot aggregate them.
+do:  One JSON object per event with stage, duration, row count and parameters.
+
+### IDEA-453 :: Replace every print with a logger call
+phase: 1 | effort: M | tags: infra,observability
+why: Console I/O is a genuine throughput bottleneck in tight loops and carries no timestamps.
+do:  Hierarchical logging with a stream handler and a rotating file handler.
+
+### IDEA-454 :: Progress bars with meaningful postfix metrics
+phase: 1 | effort: S | tags: infra,observability
+why: A progress bar that shows only percentage does not tell you whether the job is healthy.
+do:  tqdm with rows per second, current instrument and elapsed time in the postfix.
+
+### IDEA-455 :: Profile before optimising
+phase: 2 | effort: M | tags: infra,performance
+why: Intuition about bottlenecks is wrong most of the time and optimising the wrong thing costs days.
+do:  cProfile and snakeviz on a representative run; fix only the top three entries.
+
+### IDEA-456 :: Vectorise every row loop
+phase: 2 | effort: M | tags: infra,performance
+why: for i in range(len(df)) is typically a hundred times slower and more bug-prone than the vectorised form.
+do:  Grep for iterrows and itertuples; replace with numpy or pandas operations.
+
+### IDEA-457 :: Numba for the loops that genuinely cannot vectorise
+phase: 3 | effort: M | tags: infra,performance
+why: Some recursive filters are inherently sequential, and a jitted loop beats a slow pandas workaround.
+do:  Apply @njit narrowly, to small pure-numeric functions only, and benchmark the before and after.
+
+### IDEA-458 :: Parallelise across instruments
+phase: 2 | effort: M | tags: infra,performance
+why: Feature computation is embarrassingly parallel across the instrument axis.
+do:  joblib or multiprocessing over instruments; expect better than four times speedup; your ANALYSIS_WORKERS note already anticipates this.
+
+### IDEA-459 :: Cache expensive intermediate results
+phase: 2 | effort: M | tags: infra,performance
+why: Recomputing identical features on every run is most of your wall-clock time.
+do:  Content-addressed cache keyed on inputs and code version; invalidate on either changing.
+
+### IDEA-460 :: Incremental feature computation
+phase: 2 | effort: L | tags: infra,performance
+why: A daily update should not trigger a full historical rebuild.
+do:  Compute only the new tail, with enough warm-up history for the longest lookback. Gate 2 requires under five minutes.
+
+### IDEA-461 :: Memory-aware chunked reads
+phase: 1 | effort: M | tags: infra,reliability
+why: The 50,000-run failure is best explained by loading a 1.6 GB file into a process already holding 1.4 GB.
+do:  Iterate in chunks, process, write, release. Never hold the full panel and the full feature frame simultaneously.
+
+### IDEA-462 :: Monitor peak memory per stage
+phase: 1 | effort: S | tags: infra,reliability
+why: Knowing which stage peaks is what turns a silent death into a fixable bug.
+do:  Log peak RSS per stage; alert when any stage exceeds a fraction of available RAM.
+
+### IDEA-463 :: Docker for reproducibility
+phase: 5 | effort: L | tags: infra,reproducibility
+why: "Works on my machine" becomes a real problem the moment anyone else runs your dissertation code.
+do:  A Dockerfile pinning Python and every dependency; verify the full pipeline runs in the container.
+
+### IDEA-464 :: Separate research and production dependency sets
+phase: 5 | effort: S | tags: infra,security
+why: Production should not carry Jupyter, plotting libraries and every experiment-only package.
+do:  requirements.txt plus requirements-dev.txt; production installs only the former.
+
+### IDEA-465 :: Regenerate the lock file after every upgrade
+phase: 1 | effort: S | tags: infra,reproducibility
+why: You created requirements-lock.txt on 2026-10-20; it goes stale the first time you install anything.
+do:  Make lock regeneration part of the upgrade routine, and commit the diff.
+
+### IDEA-466 :: Run cards for every training run
+phase: 1 | effort: M | tags: infra,reproducibility
+why: Three months later you cannot answer "what produced this number" without one.
+do:  JSON with git commit, config hash, seed, data vintage, row count, duration and volatility regime percentile.
+
+### IDEA-467 :: Experiment tracking with MLflow
+phase: 3 | effort: M | tags: infra,mlops
+why: Dozens of runs in flat files become unsearchable, and you will have hundreds.
+do:  Log parameters, metrics and artefacts per run; the trial count for the deflated Sharpe falls out for free.
+
+### IDEA-468 :: Deterministic seeding through generator objects
+phase: 1 | effort: S | tags: infra,reproducibility
+why: Global np.random.seed leaks state between functions and across library calls.
+do:  Pass np.random.default_rng(seed) objects explicitly; ban the global seed in review.
+
+### IDEA-469 :: Golden-output regression tests
+phase: 2 | effort: M | tags: infra,testing
+why: A refactor that silently changes a feature's values is the hardest class of bug to notice.
+do:  Store hashed outputs for a fixed input; fail CI when they change without an explicit update.
+
+### IDEA-470 :: Scheduled full-pipeline smoke test
+phase: 5 | effort: S | tags: infra,reliability
+why: Pipelines rot quietly through dependency and data changes, not through code changes.
+do:  Weekly end-to-end run on the synthetic panel; alert on any failure.
+
+# ============================================================================
+# CATEGORY I -- MONITORING AND PRODUCTION (471-490)
+# ============================================================================
+
+### IDEA-471 :: Extend the daily routine to the panel
+phase: 5 | effort: M | tags: production,monitoring
+why: routine/daily_routine.py already runs weekdays and has the right shape for this.
+do:  Add panel refresh, feature update, prediction generation and the locked prediction log.
+
+### IDEA-472 :: Feature drift monitoring
+phase: 5 | effort: M | tags: production,monitoring
+why: Features drift before predictions degrade, so drift is your early warning.
+do:  Population stability index per feature against the training distribution; alert above a threshold.
+
+### IDEA-473 :: Prediction distribution monitoring
+phase: 5 | effort: S | tags: production,monitoring
+why: A collapsed model predicting one value everywhere will not show up in accuracy for weeks.
+do:  Track the cross-sectional mean, standard deviation and extremes of predictions daily.
+
+### IDEA-474 :: Live versus backtest reconciliation
+phase: 5 | effort: M | tags: production,validation
+why: Any divergence between live and backtested predictions on the same date is a bug, always.
+do:  Run both on an overlapping window and assert they match to a tight tolerance.
+
+### IDEA-475 :: Data freshness alerts
+phase: 5 | effort: S | tags: production,monitoring
+why: A stale feed produces confident predictions on yesterday's world and nothing complains.
+do:  Assert the latest bar is within one session; halt and alert otherwise.
+
+### IDEA-476 :: Regime change alerts
+phase: 5 | effort: M | tags: production,monitoring
+why: Volatility sits at the 3rd to 17th percentile today; normalisation will be a regime change.
+do:  Alert when the volatility percentile moves more than 25 points from the training regime.
+
+### IDEA-477 :: Rolling information coefficient dashboard
+phase: 5 | effort: M | tags: production,monitoring
+why: A single historical number tells you nothing about whether the model still works.
+do:  Plot rolling 60-day IC with its confidence band; alert when the band excludes zero on the downside.
+
+### IDEA-478 :: Automated weekly report
+phase: 5 | effort: M | tags: production,reporting
+why: Monitoring nobody reads is not monitoring.
+do:  Extend the existing HTML report generator: performance, drift, regime, failures, what changed.
+
+### IDEA-479 :: Alert fatigue control
+phase: 5 | effort: S | tags: production,monitoring
+why: Twenty alerts a day means zero alerts read.
+do:  Tier alerts into critical, warning and informational; only critical interrupts you.
+
+### IDEA-480 :: Graceful degradation
+phase: 5 | effort: M | tags: production,reliability
+why: A missing data source should reduce coverage, not crash the whole run.
+do:  Predict on the instruments with complete data and report the reduced coverage explicitly.
+
+### IDEA-481 :: Model versioning with rollback
+phase: 5 | effort: M | tags: production,reliability
+why: A bad deployment needs a one-command undo, not a debugging session.
+do:  Version every model; keep the previous two; make rollback a single documented command.
+
+### IDEA-482 :: Shadow mode for new models
+phase: 5 | effort: M | tags: production,validation
+why: A new model should prove itself on live data before it influences anything.
+do:  Run the candidate alongside the incumbent, logging both, for at least a month before switching.
+
+### IDEA-483 :: Separate credentials for research and execution
+phase: 5 | effort: S | tags: production,security,critical
+why: A research script should be structurally incapable of placing a trade even if it tried.
+do:  Read-only keys for research; execution keys only in the execution service, never in a notebook.
+
+### IDEA-484 :: Kill switch
+phase: 5 | effort: S | tags: production,risk,critical
+why: You need a way to stop everything immediately without debugging first.
+do:  A single command or file flag that halts all trading and all order generation.
+
+### IDEA-485 :: Heartbeat monitoring
+phase: 5 | effort: S | tags: production,reliability
+why: A job that silently stops running is worse than one that crashes loudly.
+do:  Write a timestamp on every successful run; alert when it goes stale.
+
+### IDEA-486 :: Immutable prediction log
+phase: 5 | effort: S | tags: production,validation,critical
+why: An editable prediction log cannot prove anything to anyone, including you.
+do:  Append-only, timestamped, hashed. Never edit a row, ever, for any reason.
+
+### IDEA-487 :: Cost tracking against the model's assumption
+phase: 5 | effort: M | tags: production,costs
+why: Realised costs exceeding assumed costs quietly destroys a marginal edge.
+do:  Log realised slippage per trade; compare monthly against the backtest assumption.
+
+### IDEA-488 :: Post-mortem for every incident
+phase: 5 | effort: S | tags: production,process
+why: The same failure recurring is a process failure rather than a technical one.
+do:  Write what happened, why, and the test that now prevents it. Blameless and short.
+
+### IDEA-489 :: Runbook for common failures
+phase: 5 | effort: M | tags: production,documentation
+why: At the point of failure you will not want to reason from first principles.
+do:  One page per failure mode: symptom, diagnosis, fix, how to verify the fix worked.
+
+### IDEA-490 :: Scheduled restore test
+phase: 5 | effort: S | tags: production,reliability
+why: A backup you have never restored is a hypothesis, not a backup.
+do:  Quarterly, rebuild the full pipeline from backup on a clean machine and verify the output matches.
+
+# ============================================================================
+# CATEGORY J -- RESEARCH PROCESS, LEARNING AND CAREER (491-510)
+# ============================================================================
+
+### IDEA-491 :: Keep a decision journal
+phase: 1 | effort: S | tags: process,learning
+why: Memory reconstructs a cleaner and more rational history than what actually happened.
+do:  Record every significant decision, the alternatives, and the reasoning. Review quarterly against outcomes.
+
+### IDEA-492 :: Reproduce before you innovate
+phase: 2 | effort: L | tags: process,learning
+why: Reproducing a known result validates your infrastructure against an answer you can check.
+do:  Reproduce momentum or low-volatility end to end before trusting any novel factor you build.
+
+### IDEA-493 :: Read the primary source, not the summary
+phase: 1 | effort: M | tags: learning
+why: Blog summaries of Lopez de Prado omit the assumptions, and the assumptions are the content.
+do:  Advances in Financial Machine Learning chapters 3 to 7 are the load-bearing ones for this project.
+
+### IDEA-494 :: Implement every method you cite
+phase: 3 | effort: L | tags: learning,process
+why: You cannot defend in a viva a method you have only read about.
+do:  Purged CV, CPCV, deflated Sharpe, PBO, triple-barrier, meta-labelling, each implemented and tested by you.
+
+### IDEA-495 :: Teach it to explain it
+phase: 4 | effort: S | tags: learning,process
+why: Writing an explanation exposes exactly the gaps that a viva will find.
+do:  Write a short public post per major concept; if you cannot explain it simply you do not yet understand it.
+
+### IDEA-496 :: Build the viva question bank as you go
+phase: 4 | effort: M | tags: career,process
+why: Assembling it at the end means answering from memory rather than from notes written while it was fresh.
+do:  Every time you make a non-obvious choice, write the question an examiner would ask and your answer.
+
+### IDEA-497 :: Lead the portfolio with the honest result
+phase: 5 | effort: S | tags: career,reporting
+why: "I found and fixed a leak that was inflating accuracy from 50 to 92 percent" is more impressive to a professional than any accuracy figure.
+do:  Put the measurement and the fix at the top of the README, with the reproduction command.
+
+### IDEA-498 :: Never claim an accuracy figure without its baseline and interval
+phase: 4 | effort: S | tags: career,reporting,critical
+why: A bare accuracy number is the single clearest signal of inexperience to a quant interviewer.
+do:  Always three numbers together: the metric, its baseline, and its confidence interval.
+
+### IDEA-499 :: Publish the failures alongside the successes
+phase: 5 | effort: S | tags: career,reporting
+why: Practitioners trust someone who reports what did not work far more than someone who reports only wins.
+do:  A failed-experiments section in the repository README and in the dissertation.
+
+### IDEA-500 :: Write for the reader who will try to break it
+phase: 5 | effort: M | tags: career,reporting
+why: Anticipating the sceptic produces better work than writing for someone who already agrees.
+do:  Before submitting anything, list the five strongest objections and address each in the text.
+
+### IDEA-501 :: Weekly public technical note
+phase: 1 | effort: S | tags: career,visibility
+why: Consistent, specific, honest technical writing compounds into visibility that a CV cannot buy.
+do:  One short post per week on something you actually measured. Specific beats polished.
+
+### IDEA-502 :: Avoid the accuracy-flex post
+phase: 1 | effort: S | tags: career,visibility,critical
+why: "93 percent accuracy predicting the market" is instantly recognised by practitioners as a leak and is actively harmful.
+do:  Post methods, measurements and negative results instead. They signal competence rather than naivety.
+
+### IDEA-503 :: Contribute one fix to an open-source quant library
+phase: 4 | effort: M | tags: career,visibility
+why: A merged pull request is externally verifiable evidence in a way that a personal repository is not.
+do:  Find a documentation gap or small bug in a library you already use and fix it properly.
+
+### IDEA-504 :: Prepare a ten-minute version of the project
+phase: 5 | effort: M | tags: career,communication
+why: Every interview and every viva starts with "tell me about your project" and the first two minutes decide the rest.
+do:  Structure it as problem, measurement, reformulation, result, limitation. Practise aloud until it is fluent.
+
+### IDEA-505 :: Know your own numbers cold
+phase: 5 | effort: S | tags: career,communication
+why: Being unable to recall your own sample size or baseline in an interview undoes everything else.
+do:  Memorise: panel size, feature count, IC, net Sharpe, trial count, break-even cost.
+
+### IDEA-506 :: Prepare the "what would you do differently" answer
+phase: 5 | effort: S | tags: career,communication
+why: It is asked almost every time and a weak answer suggests you have not reflected.
+do:  The honest answer here is strong: build the panel first, before any modelling.
+
+### IDEA-507 :: Time-box exploratory work
+phase: 1 | effort: S | tags: process,discipline
+why: Interesting side quests are the most common way a plan silently fails.
+do:  Two hours maximum on anything not on the current phase gate, then stop and write down what you found.
+
+### IDEA-508 :: Schedule the monthly review and protect it
+phase: 1 | effort: S | tags: process,discipline
+why: The review is what catches drift, and it is the first thing dropped when busy.
+do:  Last Sunday of the month, one hour, in the calendar, non-negotiable.
+
+### IDEA-509 :: Maintain a "things I was wrong about" file
+phase: 1 | effort: S | tags: process,learning
+why: It is the fastest way to improve judgement and the strongest material for an interview.
+do:  Start it with the 92 percent accuracy. Add every subsequent correction, with what the tell was.
+
+### IDEA-510 :: Define what finishing looks like, in writing
+phase: 0 | effort: S | tags: process,discipline,critical
+why: A project without a definition of done expands until it collapses under its own weight.
+do:  Write the one-paragraph description of the finished system, date it, and reread it at every monthly review.
