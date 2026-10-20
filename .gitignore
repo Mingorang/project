@@ -61,3 +61,6 @@ Learn_backup.zip
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Local run state - regenerated on every run, never worth committing
+stock_testing/generator/routine/routine_state.json
