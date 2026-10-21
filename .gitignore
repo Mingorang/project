@@ -25,6 +25,10 @@ stock_testing/generator/looped_results_*.zip
 # A single forest from a 50k-run batch is ~4.4 MB; they are rebuilt by training.
 *.pkl
 *.joblib
+# Columnar bulk storage. Phase 1 of the build manual moves the panel off CSV
+# onto Parquet (idea 212); those files are large, generated, and rebuildable.
+*.parquet
+*.feather
 
 # ── Generated reports (rebuild: python routine/daily_routine.py) ─────────────
 stock_testing/generator/routine/reports/
@@ -64,3 +68,7 @@ desktop.ini
 
 # Local run state - regenerated on every run, never worth committing
 stock_testing/generator/routine/routine_state.json
+# Run cards written beside the code by regime_check.py (idea 466): git commit,
+# config hash, seed and volatility regime for one training run. Per-machine
+# state, rewritten each run; the durable record belongs in the results ledger.
+run_card_*.json
