@@ -1,0 +1,15 @@
+# Exact versions this project was last run and tested with (direct dependencies only).
+# Recreate that environment:   python -m pip install -r requirements-lock.txt
+# Refresh after upgrading:     python -m pip list --format=freeze   (copy the lines for the packages below)
+numpy==2.5.3
+pandas==3.0.6
+scipy==1.18.1
+scikit-learn==1.9.1
+matplotlib==3.11.2
+mplfinance==0.12.10b0
+yfinance==1.7.0
+joblib==1.6.0
+pillow==12.3.0
+python-dateutil==2.9.0.post0
+xgboost==3.4.1
+lightgbm==4.7.0

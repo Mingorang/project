@@ -1,0 +1,27 @@
+# Python packages for the ML stock project.
+# Needs Python 3.11 or newer (the code imports tomllib). Tested on Python 3.14 / Windows 11.
+#
+# Install everything in one go (run from this folder):
+#     python -m pip install -r requirements.txt
+#
+# On Windows "pip" is often not on PATH, so always call it through Python: "python -m pip ...".
+# Format of one line:  name  operator  version      (>= means "this version or newer", == means "exactly this")
+
+numpy>=2.5
+pandas>=3.0
+scipy>=1.18
+scikit-learn>=1.9
+matplotlib>=3.11
+mplfinance>=0.12.10b0
+yfinance>=1.7
+joblib>=1.6
+pillow>=12.3
+python-dateutil>=2.9
+
+# Extra models compared by ml_model.py (skipped with a "pip install ..." message when missing)
+xgboost>=3.4
+lightgbm>=4.7
+
+# Optional: used only when installed (leave commented out unless you want them)
+# shap
+# ruptures
