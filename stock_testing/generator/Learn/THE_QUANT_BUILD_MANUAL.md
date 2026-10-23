@@ -1394,8 +1394,8 @@ Ideas 101 and 110 are the two highest-value items in this entire file. Neither a
 
 | Module | Syllabus | Where this project meets it |
 |---|---|---|
-| **MTH6157 / MTH6158** Financial Mathematics I & II | Binomial models, GBM, Itô's lemma, risk-neutral measure, Black–Scholes | Part VI.1. The exact GBM discretisation and the $-\sigma^2/2$ Itô correction are directly examinable, and you have a bug report showing what happens without them. |
-| **MTH6174 / MTH6175** Stochastic Calculus | Martingales, stopping times, SDEs, Girsanov, local/stochastic volatility | Part VI.2. Heston, the Feller condition, Ornstein–Uhlenbeck and its exact discretisation. |
+| **MTH6154 / MTH6155** Financial Mathematics I & II | Binomial models, GBM, Itô's lemma, risk-neutral measure, Black–Scholes | Part VI.1. The exact GBM discretisation and the $-\sigma^2/2$ Itô correction are directly examinable, and you have a bug report showing what happens without them. |
+| **Stochastic calculus** (no QMUL module code verified; check the current module directory. The nearest confirmed modules are MTH6141 Random Processes and MTH6155 Financial Mathematics II) | Martingales, stopping times, SDEs, Girsanov, local/stochastic volatility | Part VI.2. Heston, the Feller condition, Ornstein–Uhlenbeck and its exact discretisation. |
 | **MTH6139** Time Series | Stationarity, ARMA, ACF/PACF, ARCH/GARCH, spectral methods | Parts III.1 and VI.3–VI.4. Your AR(1) detection experiment *is* an applied ACF study with a power analysis attached. |
 | **MTH793U / ECS784P** Machine Learning | Supervised classification, ensembles, regularisation, evaluation | Parts VII and the Phase 3 model layer. Purged CV and the leakage audit are well beyond the usual coursework level. |
 | **MTH6100 / MTH700P** Research Project | Independent research, dissertation, viva | Phases 4–5 in full. |
