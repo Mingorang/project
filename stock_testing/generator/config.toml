@@ -1,7 +1,9 @@
 # ─────────────────────────────────────────────────────────────────────────────
 #  config.toml - every tunable of the self-correcting simulator.
-#  Missing keys fall back to the defaults in backtest_compare.DEFAULT_CONFIG.
-#  Unknown keys are reported (not silently ignored) when a script starts.
+#  Missing keys fall back to the defaults in project_config.DEFAULT_CONFIG.
+#  Every value is checked against its allowed range (project_config.SCHEMA) when a
+#  script starts: an out-of-range value stops the run with a list of what to fix.
+#  Unknown keys are reported (not silently ignored).
 # ─────────────────────────────────────────────────────────────────────────────
 
 [tutorial]
@@ -13,6 +15,83 @@ archive_after_run = false           # zip the per-run CSV/PNG files after the an
 archive_dir = ""                    # e.g. a OneDrive / Google Drive / Dropbox folder ("" = next to the scripts)
 delete_loose_after_archive = false  # remove the loose files once the zip is written
 keep_png = true                     # false = leave PNGs out of the archive
+
+[indicators]                        # ONE table for every chart, analysis, scan and ML feature:
+                                    # market_analysis.py, analyze_looped_results.R, live mode, routine/scan.py
+fast_sma = 4                        # fast simple moving average (candles): the crossover trigger line
+slow_sma = 14                       # slow SMA; also the t-interval window and the fewest candles a chart may have
+ci_level = 0.975                    # two-sided confidence of the t-interval around the slow-SMA mean (0.95 = 95 %)
+target_r = 2.5                      # crossover take-profit as a multiple of the initial risk (2.0 = 2R)
+bollinger_window = 20
+bollinger_sd = 2.0                  # band half-width in standard deviations
+rsi_period = 14
+rsi_overbought = 73.0
+rsi_oversold = 35.0
+macd_fast = 12
+macd_slow = 26
+macd_signal = 9                     # the signal line completes after macd_slow + macd_signal candles
+atr_period = 14
+# CSV column names keep their historical labels (fast_sma_5, slow_sma_12, ci95_*, rsi_14 ...) so stored
+# histories and the ML feature list stay compatible; the windows actually used are the values above and
+# are recorded per run in analysis_summary.csv (fast_window, slow_window, confidence_level).
+
+[session]                           # simulated trading session (price_modeling.py options 1 and 2)
+start_hour = 9                      # 24-hour market (FX, crypto): start_hour = 0 and minutes = 1440
+minutes = 540
+scale_period_change_to_daily = true # feed change / sqrt(trading days) to the vol formula (its native scale)
+backtest_point_in_time_change = true  # backtest cycles only see the market change from BEFORE they start
+max_candles_comfy = 100             # interval menus flag more candles than this as a crowded chart
+
+[volatility]                        # where every simulation's starting vol_index comes from (options 1 and 2)
+source = "realized"                 # realized | formula
+# realized: the real per-candle volatility of the window just BEFORE the simulated one, at the same
+#           candle size (vol_index = sigma / 0.2309). A backtest cycle never sees its own prices.
+# formula:  the original market-change sigmoid. It is lopsided (+1 % day -> vol 64.7, -1 % -> 0.18) and
+#           ignores the candle size, which is what made 15-minute backtests collapse to zero.
+daily_lookback = 20                 # fallback when the previous window has no real candles: this many daily
+                                    # closes before the window, scaled to one candle
+
+[limits]                            # hard bounds: prompts, CLI flags and learned values are checked against these
+vol_index_min = 0.001               # per-bar sigma ~0.0002 %; smaller is a flat line (1e-100 is rejected / raised)
+vol_index_max = 200.0               # per-bar sigma ~46 %; past ~249 one bar can wipe out the whole price
+start_price_min = 1e-6
+start_price_max = 1e9
+max_runs = 200000                   # "How many plots?"
+max_cycles = 500                    # backtest cycles (also limited by how far back Yahoo has data)
+max_loops = 50                      # self-correction learning loops
+
+[performance]                       # big runs: one chart takes ~2.4 s, so 1,000 runs with charts took ~50 min
+chart_workers = 0                   # processes that draw chart PNGs: 0 = all CPU cores but one, 1 = this process only
+parallel_min_charts = 24            # fewer charts than this are drawn here (starting the workers costs ~3 s)
+
+[live]                             # option 3 - current market data (real Yahoo Finance bars)
+periods = ["1d", "5d", "1m", "3m", "6m", "ytd", "1y", "2y", "5y", "10y", "max"]
+candles_min = 80                    # the candle size of every chart is chosen automatically so the
+candles_max = 140                   # candle count lands in [candles_min, candles_max] ...
+candles_target = 110                # ... as close to this as the data allows
+forward_runs_per_period = 9         # simulated future paths per period, vol calibrated on that period (0 = real only)
+real_weight = 3.0                   # ML sample weight of a real-market row; must be larger than ...
+sim_weight = 1.0                    # ... the weight of a simulated (predicted) row
+chart_simulated_runs = false        # true = source / analysis PNGs for the simulated runs as well
+context_symbols = ["S&P 500=^GSPC", "VIX=^VIX", "DXY=DX-Y.NYB"]   # extra snapshot rows ("Name=SYMBOL"), [] = none
+snapshot_years = 5                  # daily history behind the vol percentile and the 200-day average
+default_save_state = 1              # save state used when you press Enter (1-6, same menu as options 1 and 2)
+
+[scan]                              # routine/scan.py and the live snapshot: what counts as "worth reporting"
+vol_pctile_shift = 10               # percentile points
+big_move_sigma = 2.0                # today's move in units of its own 20-day sigma
+stale_bars = 4                      # business days without a new bar
+flat_run = 4                        # identical consecutive closes
+min_history_bars = 250              # fewer daily bars = download treated as failed
+
+[scoring]                           # backtest accuracy index (backtest_compare.py); the four weights sum to 1
+w_path = 0.40
+w_direction = 0.25
+w_net_move = 0.20
+w_range = 0.15
+path_tolerance = 0.5                # RMSE / net-move error equal to this share of the range scores -1
+min_coverage = 0.5                  # a cycle needs this share of its bars covered by real data to be scored
+min_bars_absolute = 8
 
 [pruning]                           # outlier run detection (ml_model.py)
 enabled = true
@@ -143,6 +222,11 @@ online_add_trees = 100
 online_update = false
 tune_rf = false
 tuning_config = "rf_tuning.toml"
+train_frac = 0.70                   # ordered block split: train / validation / test (test = the rest)
+val_frac = 0.15
+nan_drop_pct = 0.80                 # drop a feature when more than this share of training rows is NaN
+n_estimators = 500                  # trees in the main random forest
+keep_history = "ask"                # ask | yes | no - accumulate rows across runs (live mode always starts clean)
 
 [daily_tip]
 enabled = false

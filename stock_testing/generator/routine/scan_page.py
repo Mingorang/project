@@ -150,7 +150,8 @@ def _cards(items: list[dict], who_key: str, what_key: str, severity=None) -> str
     return "".join(out)
 
 
-def write_page(scan: dict, path: Path = PAGE) -> Path:
+def write_page(scan: dict, path: Path = PAGE, title: str = "Daily market scan",
+               footer_html: str | None = None) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     rows, changes, issues = scan["rows"], scan["changes"], scan["issues"]
     crit = [i for i in issues if i["severity"] == "critical"]
@@ -178,21 +179,26 @@ def write_page(scan: dict, path: Path = PAGE) -> Path:
                               "instrument", "issue",
                               severity=lambda i: "crit" if i["severity"] == "critical" else "warn")
     else:
-        health_block = ('<p class="quiet">All eight series passed: fresh bars, no missing days beyond '
+        health_block = (f'<p class="quiet">All {len(rows)} series passed: fresh bars, no missing days beyond '
                         'holidays, no non-positive prices, no flat-quote runs, no returns beyond 10 sigma.</p>')
 
     status = ('<span class="pill crit">%d critical</span>' % len(crit) if crit else '<span class="pill ok">no critical issues</span>')
     if warn:
         status += ' <span class="pill warn">%d warning%s</span>' % (len(warn), "s" if len(warn) != 1 else "")
 
-    page = f"""<title>Daily Market Scan</title>
+    footer = footer_html if footer_html is not None else (
+        "Replaced on every run, so this link always shows the latest scan; one row per instrument per run is\n"
+        "  appended to <code>routine/scan_history.csv</code>, which is what the &ldquo;what changed&rdquo; section reads.\n"
+        "  Rebuild by hand with <code>python routine/daily_routine.py</code>.\n"
+        "  Bands are volatility ranges, not forecasts. Nothing here is investment advice.")
+    page = f"""<title>{html.escape(title.title() if title == "Daily market scan" else title)}</title>
 <meta name="claude:viewport-fit-sides" content="cover">
 {FONTS}
 {STYLE}
 <div class="wrap">
 <header>
   <p class="eyebrow">{len(scan['marks'])} instruments &middot; {len(scan['context'])} context &middot; Yahoo Finance daily bars</p>
-  <h1>Daily market scan</h1>
+  <h1>{html.escape(title)}</h1>
   <p class="quiet">{html.escape(verdict)}</p>
   <p class="asof">Market data as of {html.escape(scan['asof'])} &middot; page rebuilt {dt.datetime.now():%Y-%m-%d %H:%M} &middot; {status}</p>
 </header>
@@ -217,10 +223,7 @@ def write_page(scan: dict, path: Path = PAGE) -> Path:
 </section>
 
 <footer>
-  Replaced on every run, so this link always shows the latest scan; one row per instrument per run is
-  appended to <code>routine/scan_history.csv</code>, which is what the &ldquo;what changed&rdquo; section reads.
-  Rebuild by hand with <code>python routine/daily_routine.py</code>.
-  Bands are volatility ranges, not forecasts. Nothing here is investment advice.
+  {footer}
 </footer>
 </div>
 """

@@ -111,6 +111,10 @@ def yahoo_interval_order(step_ns: int) -> list[str]:
 
 Fetcher = Callable[[str, str, pd.Timestamp, pd.Timestamp], "pd.DataFrame | None"]
 
+# Floor mode (not futures): a bar, gap or wick that would reach 0 or below is set to this share of its
+# reference price instead (bars that stay above 0 are left exactly as generated).
+MIN_PRICE_FRACTION = 0.01
+
 HALO_COLOR = "#7fd1ff"
 UP_COLOR = "#21d6a2"
 DOWN_COLOR = "#ff6b77"
@@ -239,45 +243,66 @@ def _tolerance_score(error: float, scale: float) -> float:
     return 1.0 - 2.0 * min(1.0, error / (PATH_TOLERANCE * scale))
 
 
-def wick_to_body_ratio(frame: pd.DataFrame) -> float:
-    """Mean wick length / mean candle body (scale-free, so sim and real need no rebasing)."""
-    high = frame["High"].to_numpy(dtype=float)
-    low = frame["Low"].to_numpy(dtype=float)
-    body = np.abs(frame["Close"].to_numpy(dtype=float) - frame["Open"].to_numpy(dtype=float))
+OHLC_FIELDS = ["Open", "High", "Low", "Close"]
+_O, _H, _L, _C = range(4)                        # column positions in an OHLC array
+
+
+def ohlc_array(frame: "pd.DataFrame | np.ndarray") -> np.ndarray:
+    """(n, 4) float array of Open, High, Low, Close (an array is passed through unchanged).
+
+    The scorers below work on arrays: on 100-bar tables pandas column lookups cost ~20 ms per
+    comparison while the arithmetic costs microseconds, which made the chance level and the
+    volatility search slow at hundreds of cycles. Convert a frame once and reuse the array.
+    """
+    if isinstance(frame, np.ndarray):
+        return frame
+    return frame[OHLC_FIELDS].to_numpy(dtype=float)
+
+
+def _wick_ratio(a: np.ndarray) -> float:
+    high, low = a[:, _H], a[:, _L]
+    body = np.abs(a[:, _C] - a[:, _O])
     body_mean = float(np.nanmean(body)) if len(body) else float("nan")
     if not np.isfinite(body_mean) or body_mean <= 1e-12:
         return float("nan")
     return float(np.nanmean((high - low) - body) / body_mean)
 
 
-def score_cycle(sim: pd.DataFrame, real: pd.DataFrame, exact_weights: dict[str, float] | None = None) -> dict[str, Any]:
-    """Compare one simulated cycle with its aligned real data -> accuracy index."""
-    valid = (real["Open"].notna() & real["Close"].notna()).to_numpy()
+def wick_to_body_ratio(frame: "pd.DataFrame | np.ndarray") -> float:
+    """Mean wick length / mean candle body (scale-free, so sim and real need no rebasing)."""
+    return _wick_ratio(ohlc_array(frame))
+
+
+def score_cycle(sim: "pd.DataFrame | np.ndarray", real: "pd.DataFrame | np.ndarray",
+                exact_weights: dict[str, float] | None = None) -> dict[str, Any]:
+    """Compare one simulated cycle with its aligned real data -> accuracy index (frames or ohlc_array()s)."""
+    S, R = ohlc_array(sim), ohlc_array(real)
+    valid = ~(np.isnan(R[:, _O]) | np.isnan(R[:, _C]))
     positions = np.flatnonzero(valid)
-    needed = max(MIN_BARS_ABSOLUTE, math.ceil(MIN_COVERAGE * len(sim)))
+    needed = max(MIN_BARS_ABSOLUTE, math.ceil(MIN_COVERAGE * len(S)))
     if len(positions) < needed:
         return {"status": "insufficient real data", "valid_bars": int(len(positions))}
 
     base = int(positions[0])
-    sim_base, real_base = float(sim["Open"].iloc[base]), float(real["Open"].iloc[base])
+    sim_base, real_base = float(S[base, _O]), float(R[base, _O])
     if sim_base <= 0 or real_base <= 0:
         return {"status": "non-positive base price", "valid_bars": int(len(positions))}
 
-    s, r = sim.iloc[positions], real.iloc[positions]
+    s, r = S[positions], R[positions]
 
-    def pct(frame: pd.DataFrame, column: str, base_value: float) -> np.ndarray:
-        return (frame[column].to_numpy(dtype=float) / base_value - 1.0) * 100.0
+    def pct(a: np.ndarray, column: int, base_value: float) -> np.ndarray:
+        return (a[:, column] / base_value - 1.0) * 100.0
 
-    sim_close, real_close = pct(s, "Close", sim_base), pct(r, "Close", real_base)
-    sim_range = pct(s, "High", sim_base).max() - pct(s, "Low", sim_base).min()
-    real_range = pct(r, "High", real_base).max() - pct(r, "Low", real_base).min()
+    sim_close, real_close = pct(s, _C, sim_base), pct(r, _C, real_base)
+    sim_range = pct(s, _H, sim_base).max() - pct(s, _L, sim_base).min()
+    real_range = pct(r, _H, real_base).max() - pct(r, _L, real_base).min()
     scale = max(sim_range, real_range, 1e-9)
 
     rmse = float(np.sqrt(np.mean((sim_close - real_close) ** 2)))
     path = _tolerance_score(rmse, scale)
 
-    sim_up = (s["Close"].to_numpy() >= s["Open"].to_numpy())
-    real_up = (r["Close"].to_numpy() >= r["Open"].to_numpy())
+    sim_up = (s[:, _C] >= s[:, _O])
+    real_up = (r[:, _C] >= r[:, _O])
     direction = 2.0 * float(np.mean(sim_up == real_up)) - 1.0
 
     net_move = _tolerance_score(abs(float(sim_close[-1] - real_close[-1])), scale)
@@ -286,12 +311,12 @@ def score_cycle(sim: pd.DataFrame, real: pd.DataFrame, exact_weights: dict[str, 
     direction_match_pct = float(np.mean(sim_up == real_up))
     # [PRICE] criterion: 1 - |sim_close - real_close| / real_close (idea 3). The real close is
     # rebased to the simulation start so the two price levels are comparable (see module notes).
-    real_close_last = float(r["Close"].iloc[-1]) * (sim_base / real_base)
-    sim_close_last = float(s["Close"].iloc[-1])
+    real_close_last = float(r[-1, _C]) * (sim_base / real_base)
+    sim_close_last = float(s[-1, _C])
     net_price_match = (1.0 - abs(sim_close_last - real_close_last) / abs(real_close_last)
                        if real_close_last != 0 else float("nan"))
     # Wick-to-body ratio (ideas 'wick-ratio self-correction' and EXACT delta term).
-    sim_wick, real_wick = wick_to_body_ratio(s), wick_to_body_ratio(r)
+    sim_wick, real_wick = _wick_ratio(s), _wick_ratio(r)
     if np.isfinite(sim_wick) and np.isfinite(real_wick) and sim_wick > 0 and real_wick > 0:
         wick_score = 1.0 - 2.0 * min(1.0, abs(math.log(sim_wick / real_wick)) / math.log(3.0))
     else:
@@ -331,7 +356,7 @@ def score_cycle(sim: pd.DataFrame, real: pd.DataFrame, exact_weights: dict[str, 
 
 
 # ─── real_indicator (terminal only) ───────────────────────────────────────────
-def real_indicator(sim: pd.DataFrame, real: pd.DataFrame) -> dict[str, Any]:
+def real_indicator(sim: "pd.DataFrame | np.ndarray", real: "pd.DataFrame | np.ndarray") -> dict[str, Any]:
     """How close one simulated run is to the real price, as a -1 .. +1 index.
 
     TERMINAL ONLY: the result is printed by run_backtest_comparison() and is never
@@ -354,17 +379,17 @@ def real_indicator(sim: pd.DataFrame, real: pd.DataFrame) -> dict[str, Any]:
     4. Mapped to the requested scale (+1 = 100% correlated, -1 = 0 correlation):
            real_indicator = 2 * max(0, concordance) - 1  =  1 - 2 * min(1, MSE/reference)
     """
-    fields = ["Open", "High", "Low", "Close"]
-    present = real[fields].notna().all(axis=1).to_numpy()
+    S, R = ohlc_array(sim), ohlc_array(real)
+    present = ~np.isnan(R).any(axis=1)
     positions = np.flatnonzero(present)
-    needed = max(MIN_BARS_ABSOLUTE, math.ceil(MIN_COVERAGE * len(sim)))
+    needed = max(MIN_BARS_ABSOLUTE, math.ceil(MIN_COVERAGE * len(S)))
     if len(positions) < needed:
         return {"status": "insufficient real data", "valid_bars": int(len(positions))}
 
     base = int(positions[0])
-    sim_ohlc = sim[fields].iloc[positions].to_numpy(dtype=float)
-    real_ohlc = real[fields].iloc[positions].to_numpy(dtype=float)
-    sim_base, real_base = float(sim["Open"].iloc[base]), float(real["Open"].iloc[base])
+    sim_ohlc = S[positions]
+    real_ohlc = R[positions]
+    sim_base, real_base = float(S[base, _O]), float(R[base, _O])
     if min(sim_ohlc.min(), real_ohlc.min(), sim_base, real_base) <= 0:
         return {"status": "non-positive price", "valid_bars": int(len(positions))}
 
@@ -387,7 +412,35 @@ def real_indicator(sim: pd.DataFrame, real: pd.DataFrame) -> dict[str, Any]:
     }
 
 
-def _print_real_indicator(results: list[tuple[Any, dict[str, Any]]], total: int) -> float:
+def chance_baseline(items: list[dict[str, Any]], max_others: int = 20, max_pairs: int = 2000) -> dict[str, float]:
+    """Score every simulation against the real prices of OTHER cycles (same candle grid, unrelated path).
+
+    A generator that knows nothing about the real path scores like this on average, so it is the
+    chance level of both indices: (overall index - chance) is the skill, and an index far BELOW
+    chance means the simulation is broken (e.g. prices collapsing to zero), not just uninformed.
+    At most `max_pairs` pairs in total (identical up to 100 cycles): a mean of 2,000 pairs is already
+    precise to about +-0.01, and 20 pairs per cycle cost ~2.5 minutes at 1,000 cycles.
+    """
+    usable = [it for it in items if it.get("real") is not None]
+    per_item = max(1, min(max_others, max_pairs // max(1, len(usable))))
+    sims = [ohlc_array(it["sim"]) for it in usable]      # convert once, not once per pair
+    reals = [ohlc_array(it["real"]) for it in usable]
+    acc, ind = [], []
+    for i in range(len(usable)):
+        others = [j for j in range(len(usable)) if j != i and len(reals[j]) == len(sims[i])]
+        step = max(1, len(others) // per_item)
+        for j in others[::step][:per_item]:
+            score = score_cycle(sims[i], reals[j])
+            if score.get("status") == "scored":
+                acc.append(score["index"])
+            indicator = real_indicator(sims[i], reals[j])
+            if indicator.get("status") == "scored":
+                ind.append(indicator["index"])
+    return {"accuracy_index": float(np.mean(acc)) if acc else float("nan"),
+            "real_indicator": float(np.mean(ind)) if ind else float("nan"), "pairs": len(acc)}
+
+
+def _print_real_indicator(results: list[tuple[Any, dict[str, Any]]], total: int, chance: float = float("nan")) -> float:
     """Print the per-cycle and overall real_indicator; return the overall value."""
     verbose = total <= 100
     step = max(1, total // 20)
@@ -407,6 +460,9 @@ def _print_real_indicator(results: list[tuple[Any, dict[str, Any]]], total: int)
     overall = float(np.mean(values)) if values else float("nan")
     shown = f"{overall:+.3f}" if np.isfinite(overall) else "n/a"
     print(f"  Overall real_indicator: {shown}  ({len(values)} of {total} cycles)")
+    if np.isfinite(chance) and np.isfinite(overall):
+        print(f"  Chance level:           {chance:+.3f}  (the same simulations scored against OTHER cycles' real "
+              f"prices)  ->  skill {overall - chance:+.3f}")
     return overall
 
 
@@ -630,7 +686,8 @@ def run_backtest_comparison(
             })
             price_rows.append(aligned)
 
-    real_indicator_overall = _print_real_indicator(indicator_results, total)
+    chance = chance_baseline(items)
+    real_indicator_overall = _print_real_indicator(indicator_results, total, chance["real_indicator"])
 
     scored_values = [item["score"]["index"] for item in items
                      if item["score"] and item["score"]["status"] == "scored"]
@@ -679,6 +736,9 @@ def run_backtest_comparison(
     summary = (f"{overall:+.3f}" if np.isfinite(overall) else "n/a")
     print(f"\nBacktest accuracy index for {symbol}: {summary}  "
           f"({len(scored_values)} of {total} cycles scored)")
+    if np.isfinite(chance["accuracy_index"]) and np.isfinite(overall):
+        print(f"  chance level {chance['accuracy_index']:+.3f} (simulations scored against other cycles' real prices)"
+              f"  ->  skill {overall - chance['accuracy_index']:+.3f}")
     print(f"Saved single backtest plot : {plot_path}")
     print(f"Saved accuracy table       : {accuracy_path}")
     direction_values = [item["score"]["direction_match_pct"] for item in items
@@ -686,6 +746,7 @@ def run_backtest_comparison(
     return {"overall_index": overall, "scored": len(scored_values), "total": total,
             "overall_direction_match_pct": float(np.mean(direction_values)) if direction_values else float("nan"),
             "real_indicator": real_indicator_overall,   # in-memory only, never written to disk
+            "chance": chance,                           # chance level of both indices (terminal + in-memory)
             "items": items,                             # sim + aligned real per cycle (re-used by the search)
             "plot": str(plot_path), "accuracy_csv": str(accuracy_path), "real_prices_csv": str(prices_path)}
 
@@ -697,115 +758,37 @@ def run_backtest_comparison(
 from scipy import optimize as spo  # noqa: E402
 from scipy import stats as sps     # noqa: E402
 
-CONFIG_FILENAME = "config.toml"
-
 # Files written to the analysis folder that must SURVIVE the per-run clean-up.
 PERSISTENT_FILES = (
     "vol_equilibrium.csv", "vol_history.csv", "vol_search_audit.csv",
     "regime_vol_multipliers.csv", "equilibrium_log.txt", "recal_state.json",
+    "live_scan_history.csv",
 )
 
-# Every tunable lives here; config.toml overrides any key (single source of truth).
-DEFAULT_CONFIG: dict[str, Any] = {
-    "tutorial": {"mode": "off"},                                  # off | beginner | advanced
-    "storage": {
-        "auto_create_folders": True,                              # idea 83
-        "archive_after_run": False, "archive_dir": "",
-        "delete_loose_after_archive": False, "keep_png": True,
-    },
-    "pruning": {                                                  # outlier run detection
-        "enabled": True, "pct_difference": 150.0, "min_rows_kept": 10,
-        "columns": ["realized_vol_per_bar_pct", "high_low_range_pct_of_low", "max_drawdown_pct_positive_prices_only"],
-    },
-    "generator": {
-        "wick_factor": 3.5 / 15, "wick_bull": 1.0, "wick_bear": 1.0,
-        "jump_prob": 0.0, "jump_size": 2.0, "ar1": 0.0,
-        "gap_prob": 0.0, "gap_sigma_pct": 0.05,
-        "dist": "uniform", "skew_alpha": 0.0, "quantile_level": 0.5,
-        "profile_enabled": True, "volume_enabled": True,
-        "volume_base": 1_000_000.0, "volume_beta": 1.0, "volume_noise": 0.35,
-        # idea 1: after a run of n same-direction bars the chance of one more is
-        # c1 * decay**((n-1)//every); decay = 1 - 0.04*e; c1/every are calibrated so that
-        # P(10 bars the same way) ~ target_p10 (3.2 %).
-        "streak_enabled": True, "streak_decay_factor": 0.04, "streak_target_p10": 0.032,
-        "streak_max_c1": 0.95,
-    },
-    "volatility_search": {
-        "enabled": True, "method": "auto",                        # auto|step|bisect|grid|coarse_fine|cobyla|bayes|ga|mc
-        "criteria": ["path", "bars", "price"],                    # any of path bars price exact streak_ks kl acf drawdown info_ratio
-        "target": 0.30, "step_abs": 0.05, "step_pct": 10.0, "step_mode": "pct",
-        "max_iters": 40, "min_step_pct": 0.25, "mc_paths": 6, "validation_paths": 12,
-        "convergence_eps": 0.002, "convergence_patience": 3,
-        "coarse_step_abs": 0.5, "fine_step_abs": 0.05, "max_grid_points": 120,
-        "range_lo_mult": 0.1, "range_hi_mult": 5.0,
-        "w_path": 0.30, "w_direction": 0.15, "w_net": 0.20, "w_range": 0.35,   # w_range anchors the variance (see composite_F)
-        "bars_min": 0.55, "price_min": 0.98, "exact_pass": 0.30,
-        "path_error_lo": 0.02, "path_error_hi": 0.60, "path_band": False,
-        "ks_p_min": 0.05, "kl_max": 0.50, "acf_ssd_max": 1.0, "info_ratio_max": 0.30,
-        "drawdown_tolerance_pct": 5.0, "winrate_tolerance": 0.25, "body_range_tolerance": 0.15,
-        "realised_vol_tolerance": 0.20, "accuracy_decay_threshold": 0.10,
-        "recal_days": 30, "recal_iters": 5, "recal_every_runs": 100, "auto_recalibrate": False,
-        "consensus_runs": 3, "bootstrap_resamples": 200, "ci_level": 0.90,
-        "sprt_enabled": True, "sprt_alpha": 0.05, "sprt_beta": 0.05,
-        "tune_shape": True, "ga_population": 12, "ga_generations": 5,
-        "bayes_init": 5, "bayes_evals": 20, "cobyla_maxiter": 40,
-        "holdout_frac": 0.25, "global_cycle_cap": 30, "loops": 1, "n_aug": 0, "aug_weight": 2.0, "ensemble_k": 1,
-        "decay_lambda_grid": [0.0, 0.005, 0.01, 0.02, 0.05], "seed_range": 10_000_000,
-        "per_cycle": True, "use_regimes": True, "use_history_seed": True, "use_transfer": True,
-        "rolling_window": 10, "weak_segment_threshold": 0.40, "profile_learning": True,
-    },
-    "objective": {                                                # optional soft penalties added to F
-        "kl": 0.0, "acf": 0.0, "drawdown": 0.0, "wick": 0.0,
-        "body_range": 0.0, "winrate": 0.0, "info_ratio": 0.0, "streak_ks": 0.0,
-    },
-    "exact": {"alpha": 0.40, "beta": 0.25, "gamma": 0.20, "delta": 0.15},
-    "ml": {
-        "label_mode": "return",                                   # return | forecast | direction_match | ensemble
-        "forecast_split": 0.70,
-        "cv_folds": 5, "embargo_pct": 0.02, "use_sample_weight": True,
-        "models": ["random_forest", "extra_trees", "logistic", "logistic_tanh", "mlp_tanh",
-                   "hist_gradient_boosting", "xgboost", "lightgbm"],
-        "conformal_alpha": 0.10, "adversarial_auc_flag": 0.55, "online_add_trees": 100, "online_update": False,
-        "tune_rf": False, "tuning_config": "rf_tuning.toml",
-    },
-    "daily_tip": {
-        "enabled": False, "time": "08:30", "channel": "print",    # print | ntfy | smtp
-        "ntfy_topic": "", "ntfy_server": "https://ntfy.sh",
-        "smtp_host": "", "smtp_port": 587, "smtp_user": "", "smtp_to": "",
-        "smtp_password_env": "ML_TIP_SMTP_PASSWORD",
-    },
-}
+# Every tunable (and its allowed range) lives in project_config.py; config.toml overrides any key.
+# Re-exported here so existing callers (bc.load_config, bc.DEFAULT_CONFIG) keep working.
+from project_config import (  # noqa: E402
+    CONFIG_FILENAME, DEFAULT_CONFIG, ConfigError, _deep_merge, clamp_vol_index,
+    load_config as _load_config,
+)
 
 
-def _deep_merge(base: dict, override: dict) -> dict:
-    out = copy.deepcopy(base)
-    for key, value in override.items():
-        if isinstance(value, dict) and isinstance(out.get(key), dict):
-            out[key] = _deep_merge(out[key], value)
-        else:
-            out[key] = value
-    return out
+def apply_scoring_config(cfg: dict[str, Any]) -> None:
+    """Point the accuracy-index constants at config.toml [scoring] (module-level so every scorer sees them)."""
+    global PATH_TOLERANCE, MIN_COVERAGE, MIN_BARS_ABSOLUTE
+    scoring = cfg["scoring"]
+    INDEX_WEIGHTS.update({"path": scoring["w_path"], "direction": scoring["w_direction"],
+                          "net_move": scoring["w_net_move"], "range": scoring["w_range"]})
+    PATH_TOLERANCE = float(scoring["path_tolerance"])
+    MIN_COVERAGE = float(scoring["min_coverage"])
+    MIN_BARS_ABSOLUTE = int(scoring["min_bars_absolute"])
 
 
 def load_config(path: str | Path | None = None) -> dict[str, Any]:
-    """DEFAULT_CONFIG overlaid with config.toml (next to this file unless `path` is given).
-
-    Unknown sections/keys are reported rather than silently ignored, so a typo in the toml
-    cannot quietly leave a setting at its default.
-    """
-    config_path = Path(path) if path else Path(__file__).with_name(CONFIG_FILENAME)
-    if not config_path.exists():
-        return copy.deepcopy(DEFAULT_CONFIG)
-    with open(config_path, "rb") as handle:
-        user = tomllib.load(handle)
-    for section, values in user.items():
-        if section not in DEFAULT_CONFIG:
-            print(f"[config] Unknown section [{section}] in {config_path.name} (ignored).")
-        elif isinstance(values, dict):
-            for key in values:
-                if key not in DEFAULT_CONFIG[section]:
-                    print(f"[config] Unknown key {section}.{key} in {config_path.name} (ignored).")
-    return _deep_merge(DEFAULT_CONFIG, user)
+    """Validated config.toml (see project_config.load_config); also applies the [scoring] section."""
+    cfg = _load_config(path)
+    apply_scoring_config(cfg)
+    return cfg
 
 
 # ─── Generator parameters ─────────────────────────────────────────────────────
@@ -959,6 +942,11 @@ def generate_ohlc_many(
     ts = pd.DatetimeIndex(timestamps)
     n, m = len(ts), int(n_paths)
     v = float(params.vol_index)
+    if not math.isfinite(v) or v <= 0:
+        # Hard guard: every caller clamps into config.toml [limits]; anything else is a bug upstream.
+        raise ValueError(f"vol_index must be a positive, finite number (got {params.vol_index!r})")
+    if not math.isfinite(float(start_price)) or float(start_price) <= 0:
+        raise ValueError(f"start price must be a positive, finite number (got {start_price!r})")
     mult = np.ones(n)
     if intraday and len(params.profile) == 24:
         mult = np.asarray(params.profile, dtype=float)[ts.hour.to_numpy()]
@@ -966,6 +954,11 @@ def generate_ohlc_many(
     gbm = params.dist == "gbm_quantile" and empirical is not None
     cont = streak_continue_table(params.streak_c1, params.streak_decay, params.streak_every)
 
+    # Floor mode keeps every price ABOVE zero. Only values the old code clamped to 0 change: a bar that would
+    # lose >= 100 % loses 99 % instead, and a gap open or wick low at or below 0 is set to 1 % of its reference.
+    # Before, such a bar became exactly 0 and, because every later bar multiplies the previous close, the run
+    # stayed at 0 for good ("falling to zero"). Paths that never touched 0 are byte-identical to the old engine.
+    floor = MIN_PRICE_FRACTION if not allow_negative else None
     o = np.empty((m, n)); h = np.empty((m, n)); l = np.empty((m, n)); c = np.empty((m, n))
     vol_out = np.empty((m, n))
     prev_close = np.full(m, float(start_price))
@@ -980,6 +973,8 @@ def generate_ohlc_many(
             gap = rng.random(m) < params.gap_prob
             if gap.any():
                 open_price[gap] = open_price[gap] * (1.0 + rng.normal(0.0, params.gap_sigma_pct / 100.0, gap.sum()))
+                if floor is not None:
+                    open_price = np.where(open_price > 0, open_price, floor * prev_close)
         if params.streak_on:
             if t == 0:
                 sign = sign_prev.copy()
@@ -1009,6 +1004,11 @@ def generate_ohlc_many(
             close = open_price * np.exp(change_pct / 100.0 - 0.5 * sig_frac ** 2)
         else:
             close = open_price * (1.0 + change_pct / 100.0)
+            if floor is not None:
+                wiped = close <= 0                                               # would lose >= 100 %
+                if wiped.any():
+                    close = np.where(wiped, floor * open_price, close)           # lose 99 % instead
+                    change_pct = np.where(wiped, (floor - 1.0) * 100.0, change_pct)
         if not allow_negative:
             close = np.maximum(0.0, close)
 
@@ -1018,8 +1018,8 @@ def generate_ohlc_many(
         wick_mult = np.where(close >= open_price, params.wick_bull, params.wick_bear)
         high = np.maximum(open_price, close) + up_wick * wick_mult
         low = np.minimum(open_price, close) - dn_wick * wick_mult
-        if not allow_negative:
-            low = np.maximum(low, 0.0)
+        if floor is not None:
+            low = np.where(low > 0, low, floor * np.minimum(open_price, close))
 
         o[:, t], h[:, t], l[:, t], c[:, t] = open_price, high, low, close
         if params.volume_on:
@@ -1030,7 +1030,12 @@ def generate_ohlc_many(
         prev_close = close
         prev_change = change_pct
 
-    out = {"Open": np.round(o, 9), "High": np.round(h, 9), "Low": np.round(l, 9), "Close": np.round(c, 9)}
+    def _round(a: np.ndarray) -> np.ndarray:
+        # 9 decimals, except where that would turn a floored (positive) price below 5e-10 into exactly 0.
+        r = np.round(a, 9)
+        return np.where((r <= 0) & (a > 0), a, r) if floor is not None else r
+
+    out = {"Open": _round(o), "High": _round(h), "Low": _round(l), "Close": _round(c)}
     if params.volume_on:
         out["Volume"] = np.maximum(np.round(vol_out), 1.0)
     return out
@@ -1347,15 +1352,16 @@ def evaluate_cycle(
     arrays = generate_ohlc_many(ctx.timestamps, ctx.start_price, params, rng, n_paths,
                                 allow_negative, ctx.intraday, empirical)
     do_heavy = _needs_heavy(cfg) if heavy is None else heavy
+    real_arr = ohlc_array(ctx.real)
+    paths = np.stack([arrays[name] for name in OHLC_FIELDS], axis=2)    # (n_paths, bars, 4)
     rows: list[dict[str, float]] = []
     for k in range(n_paths):
-        sim = pd.DataFrame({name: arrays[name][k] for name in ("Open", "High", "Low", "Close")},
-                           index=ctx.timestamps)
-        scored = score_cycle(sim, ctx.real, cfg["exact"])
+        scored = score_cycle(paths[k], real_arr, cfg["exact"])
         if scored.get("status") != "scored":
             continue
         row = {key: float(scored[key]) for key in NUMERIC_STAT_KEYS if key in scored}
-        if do_heavy:
+        if do_heavy:                                  # heavy metrics still take a DataFrame
+            sim = pd.DataFrame({name: arrays[name][k] for name in OHLC_FIELDS}, index=ctx.timestamps)
             row.update(heavy_metrics(sim, ctx.real, cfg))
         row["F"] = composite_F(row, cfg)
         rows.append(row)
@@ -1378,16 +1384,20 @@ def aggregate_stats(per_cycle: list[dict[str, float]]) -> dict[str, float]:
             if any(np.isfinite(d.get(k, np.nan)) for d in per_cycle) else float("nan") for k in keys}
 
 
+def bar_sigma_pct(real: pd.DataFrame | None) -> float:
+    """Per-candle std (%) of real close-to-close returns between ADJACENT real candles of one window
+    (an overnight or weekend jump between two covered candles that are not neighbours is left out)."""
+    if real is None or "Close" not in real:
+        return float("nan")
+    valid = np.flatnonzero(real["Close"].notna().to_numpy())
+    returns = _adjacent_returns(real["Close"].to_numpy(dtype=float)[valid], valid)
+    return float(returns.std(ddof=1)) if len(returns) > 3 else float("nan")
+
+
 def real_sigma_pct(contexts: list[CycleContext]) -> float:
     """Per-bar std (%) of the real close-to-close returns, averaged across scoreable cycles."""
-    values = []
-    for ctx in contexts:
-        if not ctx.scoreable:
-            continue
-        valid = np.flatnonzero(ctx.real["Close"].notna().to_numpy())
-        returns = _adjacent_returns(ctx.real["Close"].to_numpy(dtype=float)[valid], valid)
-        if len(returns) > 3:
-            values.append(float(returns.std(ddof=1)))
+    values = [bar_sigma_pct(ctx.real) for ctx in contexts if ctx.scoreable]
+    values = [v for v in values if np.isfinite(v)]
     return float(np.mean(values)) if values else float("nan")
 
 
@@ -1678,8 +1688,11 @@ class VolSearch:
         self._fresh_counter += 1
         salt = self.salt + (self._fresh_counter * 7919 if self.fresh else 0)
         per = []
+        limits = self.cfg["limits"]
         for ctx in self.ctxs:
-            effective = params.with_(vol_index=params.vol_index * (ctx.scale if self.use_scale else 1.0))
+            vol = params.vol_index * (ctx.scale if self.use_scale else 1.0)
+            # A regime multiplier or a strong decay can push a cycle's vol outside [limits]; never score that.
+            effective = params.with_(vol_index=min(max(vol, limits["vol_index_min"]), limits["vol_index_max"]))
             stats = evaluate_cycle(ctx, effective, self.cfg, self.n_paths,
                                    cycle_seed(self.master_seed, ctx.cycle, salt), None,
                                    self.empirical, self.allow_negative)
@@ -1960,7 +1973,7 @@ class VolSearch:
         try:
             for lam in self.vs["decay_lambda_grid"]:
                 for c, old in zip(self.ctxs, saved):
-                    c.scale = old * math.exp(-lam * c.age_index)
+                    c.scale = old * decay_factor(lam, c.age_index)
                 self.cache.clear()
                 stats = self.evaluate(params0, "decay_lambda", f"lambda={lam}")
                 results.append((stats["F"], lam, stats))
@@ -1973,6 +1986,12 @@ class VolSearch:
 
 
 # ─── Orchestration helpers ────────────────────────────────────────────────────
+def decay_factor(lam: float, age: float) -> float:
+    """exp(-lam * age), kept above 0. With lam up to 10 (allowed by the config), exp() underflowed to exactly 0.0
+    for old cycles, the cycle's vol became 0 and the engine's vol guard stopped the whole self-correction."""
+    return math.exp(-min(lam * age, 300.0))
+
+
 def discover_vol_range(contexts: list[CycleContext], cfg: dict[str, Any]) -> tuple[float, float, float]:
     """v_min = 0.1 x sigma_real, v_max = 5 x sigma_real (sigma = per-bar std of real returns, %)."""
     vs = cfg["volatility_search"]
@@ -1982,8 +2001,12 @@ def discover_vol_range(contexts: list[CycleContext], cfg: dict[str, Any]) -> tup
     else:
         base = float(np.median([c.base_vol for c in contexts])) if contexts else 3.6
         lo, hi = 0.2 * base, 5.0 * base
-    lo = max(lo, 1e-3)
-    return lo, max(hi, lo * 2.0), sigma
+    limits = cfg["limits"]
+    # Upper bound for lo never below vol_index_min: np.clip with a_min > a_max returns a_max, which put lo
+    # under the configured minimum when vol_index_min > vol_index_max / 2.
+    lo = float(min(max(lo, 1e-3, limits["vol_index_min"]), max(limits["vol_index_min"], limits["vol_index_max"] / 2.0)))
+    hi = float(min(max(hi, lo * 2.0), limits["vol_index_max"]))
+    return lo, hi, sigma
 
 
 def detect_change_point(values: list[float]) -> int | None:
@@ -2219,7 +2242,7 @@ def run_self_correction(
             lam, _ = searcher.decay_lambda_search(result.params)
             if lam > 0:
                 for c in sample:
-                    c.scale = base_scale[c.cycle] * math.exp(-lam * c.age_index)
+                    c.scale = base_scale[c.cycle] * decay_factor(lam, c.age_index)
                 searcher.cache.clear()
                 result = searcher.step_search(result.params, v_lo, v_hi, 8, "step_after_decay")
             if vs["tune_shape"]:
@@ -2239,7 +2262,7 @@ def run_self_correction(
     global_params = chosen.params
     lam_used = float(chosen.extra.get("lambda", 0.0))
     for c in ctxs:                                               # one consistent decay for every cycle
-        c.scale = base_scale[c.cycle] * math.exp(-lam_used * c.age_index)
+        c.scale = base_scale[c.cycle] * decay_factor(lam_used, c.age_index)
     consensus_vols = [r.params.vol_index for r in found]
     progress(f"[Self-correct] global vol {global_params.vol_index:.4f} (consensus {', '.join(f'{v:.3f}' for v in consensus_vols)}) "
              f"after {iterations} evaluations; decay lambda {lam_used}")
@@ -2260,7 +2283,8 @@ def run_self_correction(
                                      allow_negative=allow_negative, use_scale=False,
                                      meta={**meta, "loop": loop})
                 init = c.learned_vol if c.learned_vol else global_params.vol_index * c.scale
-                lo_c, hi_c = max(v_lo * 0.25, 1e-4), v_hi * 2.0
+                lo_c = max(v_lo * 0.25, cfg["limits"]["vol_index_min"])
+                hi_c = min(v_hi * 2.0, cfg["limits"]["vol_index_max"])
                 res = searcher.step_search(global_params.with_(vol_index=float(np.clip(init, lo_c, hi_c))), lo_c, hi_c,
                                            max_iters=min(int(vs["max_iters"]), 12 if not lightweight else 4), method="cycle_step")
                 done = getattr(c, "_loops_done", 0)

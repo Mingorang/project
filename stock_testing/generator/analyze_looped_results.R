@@ -10,19 +10,54 @@ input_dir <- file.path(model_dir, "looped_results")
 output_dir <- file.path(model_dir, "looped_results_analysis_300")
 input_source <- "working-tree files"
 
+# --- config.toml: the same [indicators] table market_analysis.py reads ---------
+# A minimal reader for flat "key = value" lines (numbers, true/false, "text"); no packages needed.
+read_toml_section <- function(path, section) {
+  values <- list()
+  if (!file.exists(path)) return(values)
+  current <- ""
+  for (raw in readLines(path, warn = FALSE, encoding = "UTF-8")) {
+    line <- trimws(sub("#.*$", "", raw))
+    if (!nzchar(line)) next
+    if (grepl("^\\[[^]]+\\]$", line)) {
+      current <- trimws(substr(line, 2L, nchar(line) - 1L))
+      next
+    }
+    if (!identical(current, section) || !grepl("=", line, fixed = TRUE)) next
+    key <- trimws(sub("=.*$", "", line))
+    text <- trimws(sub("^[^=]*=", "", line))
+    number <- suppressWarnings(as.numeric(text))
+    values[[key]] <- if (!is.na(number)) number else if (text %in% c("true", "false")) identical(text, "true") else gsub('^"|"$', "", text)
+  }
+  values
+}
+setting <- function(table, name, default) {
+  value <- table[[name]]
+  if (is.null(value) || (is.numeric(value) && !is.finite(value))) default else value
+}
+config_path <- file.path(model_dir, "config.toml")
+indicators <- read_toml_section(config_path, "indicators")
+storage <- read_toml_section(config_path, "storage")
+
 if (!dir.exists(input_dir)) {
   repo_root <- tryCatch(
     system2("git", c("-C", shQuote(model_dir), "rev-parse", "--show-toplevel"), stdout = TRUE, stderr = FALSE),
     error = function(error) character()
   )
   if (!length(repo_root)) stop("Input folder is missing and Git repository root could not be determined.")
+  # Path of this folder inside the repository (the folder has moved before, so it is never hard-coded).
+  prefix <- tryCatch(
+    system2("git", c("-C", shQuote(model_dir), "rev-parse", "--show-prefix"), stdout = TRUE, stderr = FALSE),
+    error = function(error) character()
+  )
+  relative <- paste0(if (length(prefix)) prefix[1L] else "", "looped_results")
 
   archive_path <- tempfile(fileext = ".tar")
   archive_root <- tempfile("looped-results-")
   dir.create(archive_root)
   archive_status <- system2(
     "git",
-    c("-C", shQuote(repo_root[1L]), "archive", "HEAD", "maths&stats/model/looped_results"),
+    c("-C", shQuote(repo_root[1L]), "archive", "HEAD", shQuote(relative)),
     stdout = archive_path,
     stderr = FALSE
   )
@@ -30,7 +65,7 @@ if (!dir.exists(input_dir)) {
     stop("Input folder is missing and committed looped_results files could not be read from Git HEAD.")
   }
   utils::untar(archive_path, exdir = archive_root)
-  input_dir <- file.path(archive_root, "maths&stats", "model", "looped_results")
+  input_dir <- file.path(archive_root, relative)
   if (!dir.exists(input_dir)) stop("No looped_results folder found in the Git HEAD archive.")
   input_source <- "Git HEAD archive (working-tree files were left untouched)"
 }
@@ -43,13 +78,37 @@ if (length(missing_packages)) {
 }
 if (!dir.exists(input_dir)) stop("Input folder not found: ", input_dir)
 if (!dir.exists(output_dir)) {
-  stop("Analysis output folder not found (not creating it): ", output_dir)
+  if (isTRUE(setting(storage, "auto_create_folders", FALSE))) {
+    dir.create(output_dir, recursive = TRUE)
+    message("Created the analysis output folder ([storage] auto_create_folders = true): ", output_dir)
+  } else {
+    stop("Analysis output folder not found (not creating it): ", output_dir)
+  }
 }
 
-fast_n <- 5L
-slow_n <- 12L
-confidence_level <- 0.95
-target_multiple <- 2
+# Defaults match project_config.DEFAULT_CONFIG; config.toml [indicators] overrides them.
+fast_n <- as.integer(setting(indicators, "fast_sma", 4L))
+slow_n <- as.integer(setting(indicators, "slow_sma", 14L))
+confidence_level <- as.numeric(setting(indicators, "ci_level", 0.975))
+target_multiple <- as.numeric(setting(indicators, "target_r", 1.4))
+bb_n <- as.integer(setting(indicators, "bollinger_window", 20L))
+bb_k <- as.numeric(setting(indicators, "bollinger_sd", 2))
+rsi_n <- as.integer(setting(indicators, "rsi_period", 14L))
+rsi_high <- as.numeric(setting(indicators, "rsi_overbought", 70))
+rsi_low <- as.numeric(setting(indicators, "rsi_oversold", 30))
+macd_fast_n <- as.integer(setting(indicators, "macd_fast", 12L))
+macd_slow_n <- as.integer(setting(indicators, "macd_slow", 26L))
+macd_signal_n <- as.integer(setting(indicators, "macd_signal", 9L))
+atr_n <- as.integer(setting(indicators, "atr_period", 14L))
+if (fast_n < 2L || slow_n <= fast_n || !(confidence_level > 0 && confidence_level < 1) || target_multiple <= 0 ||
+    bb_n < 2L || bb_k <= 0 || rsi_n < 2L || rsi_low >= rsi_high || macd_fast_n >= macd_slow_n || macd_signal_n < 2L ||
+    atr_n < 2L) {
+  stop("config.toml [indicators] is invalid; run: python -c \"import project_config; project_config.load_config()\"")
+}
+ci_label <- paste0(format(100 * confidence_level, digits = 4), "%")
+cat(sprintf("Indicators from %s: SMA %d/%d, %s t-interval, target %.2fR, Bollinger %d +/- %g SD, RSI %d, MACD %d-%d-%d, ATR %d\n",
+            basename(config_path), fast_n, slow_n, ci_label, target_multiple, bb_n, bb_k, rsi_n,
+            macd_fast_n, macd_slow_n, macd_signal_n, atr_n))
 
 csv_paths <- list.files(input_dir, pattern = "^data_[0-9]+\\.csv$", full.names = TRUE)
 png_paths <- list.files(input_dir, pattern = "^image_[0-9]+\\.png$", full.names = TRUE)
@@ -312,22 +371,22 @@ for (run_position in seq_along(run_ids)) {
   ci_margin <- critical_value * rolling_deviation / sqrt(slow_n)
   data$ci_lower <- data$slow_ma - ci_margin
   data$ci_upper <- data$slow_ma + ci_margin
-  data$bb_mid_20 <- rolling_mean(data$Close, 20L)
-  bb_sd <- rolling_sd(data$Close, 20L)
-  data$bb_upper_20_2sd <- data$bb_mid_20 + 2 * bb_sd
-  data$bb_lower_20_2sd <- data$bb_mid_20 - 2 * bb_sd
+  data$bb_mid_20 <- rolling_mean(data$Close, bb_n)
+  bb_sd <- rolling_sd(data$Close, bb_n)
+  data$bb_upper_20_2sd <- data$bb_mid_20 + bb_k * bb_sd
+  data$bb_lower_20_2sd <- data$bb_mid_20 - bb_k * bb_sd
   bb_width <- data$bb_upper_20_2sd - data$bb_lower_20_2sd
   data$bb_percent_b <- (data$Close - data$bb_lower_20_2sd) / ifelse(bb_width == 0, NA_real_, bb_width)
   data$bb_width_pct <- 100 * bb_width / ifelse(data$bb_mid_20 == 0, NA_real_, abs(data$bb_mid_20))
   price_change <- c(NA_real_, diff(data$Close))
-  average_gain <- wilder_smooth(pmax(price_change, 0), 14L)
-  average_loss <- wilder_smooth(pmax(-price_change, 0), 14L)
+  average_gain <- wilder_smooth(pmax(price_change, 0), rsi_n)
+  average_loss <- wilder_smooth(pmax(-price_change, 0), rsi_n)
   relative_strength <- average_gain / ifelse(average_loss == 0, NA_real_, average_loss)
   data$rsi_14 <- 100 - 100 / (1 + relative_strength)
   data$rsi_14[is.finite(average_gain) & average_loss == 0 & average_gain > 0] <- 100
   data$rsi_14[is.finite(average_gain) & average_loss == 0 & average_gain == 0] <- 50
-  data$macd_12_26 <- ema_smooth(data$Close, 12L) - ema_smooth(data$Close, 26L)
-  data$macd_signal_9 <- ema_smooth(data$macd_12_26, 9L)
+  data$macd_12_26 <- ema_smooth(data$Close, macd_fast_n) - ema_smooth(data$Close, macd_slow_n)
+  data$macd_signal_9 <- ema_smooth(data$macd_12_26, macd_signal_n)
   data$macd_histogram <- data$macd_12_26 - data$macd_signal_9
   previous_close <- c(NA_real_, head(data$Close, -1L))
   data$true_range <- pmax(
@@ -337,7 +396,7 @@ for (run_position in seq_along(run_ids)) {
     na.rm = TRUE
   )
   data$true_range[1L] <- data$High[1L] - data$Low[1L]
-  data$atr_14 <- wilder_smooth(data$true_range, 14L)
+  data$atr_14 <- wilder_smooth(data$true_range, atr_n)
   data$bar_change <- price_change
   data$bar_return_pct <- ifelse(previous_close > 0, 100 * (data$Close / previous_close - 1), NA_real_)
   data$direction <- ifelse(data$Close >= data$Open, "Up", "Down")
@@ -393,7 +452,9 @@ for (run_position in seq_along(run_ids)) {
       ggplot2::aes(ymin = bb_lower_20_2sd, ymax = bb_upper_20_2sd),
       fill = "#aeb7c2", alpha = 0.13, na.rm = TRUE
     ) +
-    ggplot2::geom_hline(yintercept = 0, color = "grey55", linetype = "dotted", linewidth = 0.35) +
+    # Zero line only when a path reaches zero (negative-price futures mode); drawing it always
+    # forced the y-axis down to 0 and flattened e.g. EUR/USD around 1.1.
+    (if (min(data$Low) <= 0) ggplot2::geom_hline(yintercept = 0, color = "grey55", linetype = "dotted", linewidth = 0.35) else NULL) +
     ggplot2::geom_segment(ggplot2::aes(xend = bar, y = Low, yend = High), color = "grey25", linewidth = 0.35) +
     ggplot2::geom_rect(
       ggplot2::aes(
@@ -413,7 +474,8 @@ for (run_position in seq_along(run_ids)) {
     ) +
     ggplot2::labs(
       title = sprintf("Run %d: OHLC, SMA and Bollinger Bands", run_id),
-      subtitle = "Blue: 95% rolling t-interval for 12-close mean | Blue line: SMA 5 | Gold line: SMA 12 | Grey band: Bollinger 20 +/- 2 SD",
+      subtitle = sprintf("Blue: %s rolling t-interval for %d-close mean | Blue line: SMA %d | Gold line: SMA %d | Grey band: Bollinger %d +/- %g SD",
+                         ci_label, slow_n, fast_n, slow_n, bb_n, bb_k),
       x = NULL, y = "Price", fill = "Candle"
     ) +
     ggplot2::theme_minimal(base_size = 10) +
@@ -446,10 +508,10 @@ for (run_position in seq_along(run_ids)) {
   )
   rsi_plot <- ggplot2::ggplot(data, ggplot2::aes(x = bar, y = rsi_14)) +
     ggplot2::geom_line(color = "#7651a8", linewidth = 0.7, na.rm = TRUE) +
-    ggplot2::geom_hline(yintercept = c(30, 70), linetype = "dashed", color = "#777777", linewidth = 0.4) +
+    ggplot2::geom_hline(yintercept = c(rsi_low, rsi_high), linetype = "dashed", color = "#777777", linewidth = 0.4) +
     ggplot2::scale_x_continuous(breaks = data$bar[first_day_rows], labels = format(day_values[first_day_rows], "%a %d %b")) +
     ggplot2::coord_cartesian(ylim = c(0, 100)) +
-    ggplot2::labs(title = "RSI (14)", subtitle = "Study [4]: Relative Strength Index", x = NULL, y = "RSI") +
+    ggplot2::labs(title = sprintf("RSI (%d)", rsi_n), subtitle = "Study [4]: Relative Strength Index", x = NULL, y = "RSI") +
     ggplot2::theme_minimal(base_size = 8) + ggplot2::theme(axis.text.x = ggplot2::element_blank(), axis.ticks.x = ggplot2::element_blank(), panel.grid.minor = ggplot2::element_blank())
   macd_plot <- ggplot2::ggplot(data, ggplot2::aes(x = bar)) +
     ggplot2::geom_col(ggplot2::aes(y = macd_histogram), fill = "#aeb7c2", width = 0.7, na.rm = TRUE) +
@@ -457,7 +519,7 @@ for (run_position in seq_along(run_ids)) {
     ggplot2::geom_line(ggplot2::aes(y = macd_signal_9), color = "#d28b00", linewidth = 0.6, na.rm = TRUE) +
     ggplot2::geom_hline(yintercept = 0, color = "#777777", linewidth = 0.4) +
     ggplot2::scale_x_continuous(breaks = data$bar[first_day_rows], labels = format(day_values[first_day_rows], "%a %d %b")) +
-    ggplot2::labs(title = "MACD (12, 26, 9)", subtitle = "Study [5]: MACD line, signal line and histogram", x = "Trading session (overnight gaps compressed)", y = "MACD") +
+    ggplot2::labs(title = sprintf("MACD (%d, %d, %d)", macd_fast_n, macd_slow_n, macd_signal_n), subtitle = "Study [5]: MACD line, signal line and histogram", x = "Trading session (overnight gaps compressed)", y = "MACD") +
     ggplot2::theme_minimal(base_size = 8) + ggplot2::theme(panel.grid.minor = ggplot2::element_blank())
   save_three_panel_plot(
     price_plot, rsi_plot, macd_plot,

@@ -13,6 +13,7 @@ instrument to scan_history.csv (the trail the "what changed" section reads next 
 from __future__ import annotations
 
 import datetime as dt
+import sys
 import warnings
 from pathlib import Path
 
@@ -25,15 +26,36 @@ HERE = Path(__file__).resolve().parent
 HISTORY = HERE / "scan_history.csv"
 CONTEXT = {"S&P 500": "^GSPC", "VIX": "^VIX", "DXY": "DX-Y.NYB"}
 
-# A change must clear one of these to be worth printing.
-VOL_PCTILE_SHIFT = 10       # percentile points
-RSI_OVERBOUGHT, RSI_OVERSOLD = 70.0, 30.0
-BIG_MOVE_SIGMA = 2.0        # today's move in units of its own 20-day sigma
-STALE_BARS = 4              # business days without a new bar
-FLAT_RUN = 4                # identical consecutive closes
+
+def _load_settings() -> dict:
+    """[scan] thresholds and the RSI settings from ../config.toml; the built-in values if it cannot be read."""
+    settings = {"vol_pctile_shift": 10, "big_move_sigma": 2.0, "stale_bars": 4, "flat_run": 4,
+                "min_history_bars": 250, "rsi_period": 14, "rsi_overbought": 70.0, "rsi_oversold": 30.0}
+    try:
+        if str(HERE.parent) not in sys.path:
+            sys.path.insert(0, str(HERE.parent))
+        import project_config
+        cfg = project_config.load_config(quiet=True)
+        settings.update(cfg["scan"])
+        settings.update({key: cfg["indicators"][key] for key in ("rsi_period", "rsi_overbought", "rsi_oversold")})
+    except Exception as exc:  # the routine must keep running even with a broken config.toml
+        print(f"[scan] config.toml not applied ({type(exc).__name__}: {exc}); built-in thresholds used")
+    return settings
 
 
-def _rsi(s: pd.Series, n: int = 14) -> pd.Series:
+_SETTINGS = _load_settings()
+# A change must clear one of these to be worth printing (config.toml [scan] / [indicators]).
+VOL_PCTILE_SHIFT = int(_SETTINGS["vol_pctile_shift"])        # percentile points
+RSI_OVERBOUGHT, RSI_OVERSOLD = float(_SETTINGS["rsi_overbought"]), float(_SETTINGS["rsi_oversold"])
+RSI_PERIOD = int(_SETTINGS["rsi_period"])
+BIG_MOVE_SIGMA = float(_SETTINGS["big_move_sigma"])          # today's move in units of its own 20-day sigma
+STALE_BARS = int(_SETTINGS["stale_bars"])                    # business days without a new bar
+FLAT_RUN = int(_SETTINGS["flat_run"])                        # identical consecutive closes
+MIN_HISTORY_BARS = int(_SETTINGS["min_history_bars"])        # fewer usable daily bars = failed download
+
+
+def _rsi(s: pd.Series, n: int | None = None) -> pd.Series:
+    n = int(n or RSI_PERIOD)
     d = s.diff()
     up = d.clip(lower=0).ewm(alpha=1 / n, adjust=False).mean()
     dn = (-d.clip(upper=0)).ewm(alpha=1 / n, adjust=False).mean()
@@ -55,7 +77,10 @@ def regime_row(name: str, close: pd.Series, high: pd.Series, low: pd.Series) -> 
     r = np.log(s).diff().dropna()
     daily = float(r.tail(20).std())
     vol_hist = r.rolling(20).std().dropna()
-    tr = pd.concat([high - low, (high - s.shift()).abs(), (low - s.shift()).abs()], axis=1).max(axis=1)
+    # Align high/low with the closes first: in a multi-symbol download one missing bar used to put a NaN
+    # into the last 14 true ranges and blank the ATR (e.g. CL=F next to the stock-market calendar).
+    h, l = high.reindex(s.index), low.reindex(s.index)
+    tr = pd.concat([h - l, (h - s.shift()).abs(), (l - s.shift()).abs()], axis=1).max(axis=1).dropna()
     sma200 = float(s.rolling(200).mean().iloc[-1])
     move_sigma = float(np.log(s.iloc[-1] / s.iloc[-2]) / daily) if daily > 0 else 0.0
     return dict(
@@ -68,7 +93,7 @@ def regime_row(name: str, close: pd.Series, high: pd.Series, low: pd.Series) -> 
         vol_pctile=int(round(float((vol_hist < daily).mean()) * 100)),
         rsi14=round(float(_rsi(s).iloc[-1]), 1),
         vs_sma200=round(float(s.iloc[-1] / sma200 - 1) * 100, 2) if np.isfinite(sma200) else float("nan"),
-        atr14_pct=round(float(tr.rolling(14).mean().iloc[-1] / s.iloc[-1]) * 100, 2),
+        atr14_pct=round(float(tr.rolling(14).mean().iloc[-1] / s.iloc[-1]) * 100, 2) if len(tr) >= 14 else float("nan"),
         band_1d_pct=round(daily * 100, 2),
         band_5d_pct=round(daily * np.sqrt(5) * 100, 2),
         last_bar=str(s.index[-1].date()),
@@ -173,10 +198,10 @@ def run_scan(marks: dict[str, str]) -> dict:
     issues: list[dict] = []
     failed: list[str] = []
     for name in symbols:
-        if name not in close or close[name].dropna().size < 250:
+        if name not in close or close[name].dropna().size < MIN_HISTORY_BARS:
             failed.append(name)
             issues.append(dict(instrument=name, severity="critical", issue="download failed",
-                               detail="fewer than 250 usable bars returned"))
+                               detail=f"fewer than {MIN_HISTORY_BARS} usable bars returned"))
             continue
         rows.append(regime_row(name, close[name], high[name], low[name]))
         issues.extend(health_rows(name, close[name], high[name], low[name], asof))

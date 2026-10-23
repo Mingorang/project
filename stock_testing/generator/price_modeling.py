@@ -6,8 +6,7 @@ import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.lines import Line2D
-import mplfinance as mpf
+import chart_jobs                     # chart PNGs (drawn on several cores for big runs)
 import os
 from pathlib import Path
 from datetime import date, timedelta
@@ -20,21 +19,51 @@ import json
 import secrets
 import shutil
 import zipfile
+import sys
 import numpy as np
 import backtest_compare as bc
 from backtest_compare import load_config
 from market_analysis import realised_vol_feedback
+import market_analysis
+import console as ui
+from project_config import ConfigError, clamp_vol_index
 
 # ─── Command line, config.toml and the volatility-search block ────────────────
+MODES = {"backtest": "Backtest", "forward": "Forward simulation", "live": "Current market data"}
+SEED_LIMIT = 10_000_000
 _parser = argparse.ArgumentParser(add_help=True, description="Random OHLC price simulator with self-correcting volatility.")
 _parser.add_argument("--config", default=None, help="Path to config.toml (default: next to this script).")
 _parser.add_argument("--seed", type=int, default=None, help="Re-use a previous run's random seed (-10,000,000 .. 10,000,000).")
+_parser.add_argument("--mode", choices=list(MODES), default=None,
+                     help="Skip the mode question: backtest | forward | live (current market data).")
+_parser.add_argument("--asset-type", default=None, help="Skip the asset-type question (forex, futures, stock, crypto, index, etf, other).")
+_parser.add_argument("--instrument", default=None, help="Skip the instrument question (e.g. SAP, GBP/USD, ^GSPC).")
+_parser.add_argument("--save-state", type=int, choices=range(1, 7), default=None, metavar="1-6",
+                     help="Skip the save-state question (1-6): live mode, and forward runs of 100+ plots.")
+_parser.add_argument("--vol-index", type=float, default=None,
+                     help="Forward runs: use this vol_index instead of the market-change formula (must lie inside config.toml [limits]).")
 _parser.add_argument("--auto-recal", action="store_true", help="Forward runs: re-calibrate the stored volatility when it is stale.")
 _parser.add_argument("--auto-correct-vol", action="store_true",
                      help="Re-generate runs whose realised volatility differs >20%% from what vol_index should give.")
 _parser.add_argument("--archive", action="store_true", help="Zip the per-run CSV/PNG files after the analysis.")
 ARGS, _UNKNOWN_ARGS = _parser.parse_known_args()
-CFG = load_config(ARGS.config)
+if _UNKNOWN_ARGS:
+    ui.warn(f"Ignoring unknown command-line argument(s): {' '.join(_UNKNOWN_ARGS)}")
+try:
+    CFG = load_config(ARGS.config)
+except ConfigError as _error:
+    ui.section("config.toml cannot be used")
+    print("\n".join("   " + line for line in str(_error).splitlines()))
+    ui.note("Fix the values above (allowed ranges live in project_config.py SCHEMA), then run again.")
+    sys.exit(2)
+market_analysis.configure(CFG["indicators"])
+LIMITS = CFG["limits"]
+if ARGS.seed is not None and not -SEED_LIMIT <= ARGS.seed <= SEED_LIMIT:
+    sys.exit(f"--seed {ARGS.seed} is outside -{SEED_LIMIT:,} .. {SEED_LIMIT:,}.")
+if ARGS.vol_index is not None and not (math.isfinite(ARGS.vol_index)
+                                       and LIMITS["vol_index_min"] <= ARGS.vol_index <= LIMITS["vol_index_max"]):
+    sys.exit(f"--vol-index {ARGS.vol_index!r} is not allowed: it must be a number from {LIMITS['vol_index_min']:g} "
+             f"to {LIMITS['vol_index_max']:g} (config.toml [limits]).")
 
 # Volatility self-correction settings (edit config.toml [volatility_search], or override here).
 VOLATILITY_SEARCH = CFG["volatility_search"]
@@ -48,6 +77,13 @@ ACCURACY_DECAY_THRESHOLD = VOLATILITY_SEARCH["accuracy_decay_threshold"]
 # ─── Tutorial modes (beginner / advanced): explain each step before it is asked ─
 TUTORIAL_MODE = str(CFG["tutorial"]["mode"]).lower()
 TUTORIAL = {
+    "mode": ("Backtest replays the past against real prices; forward simulation invents future prices; current market "
+             "data downloads the real candles for every period up to today and simulates futures from today's price.",
+             "live mode: one real window per [live] period, candle size auto-chosen for candles_min..candles_max; "
+             "forward paths use vol_index = real per-candle sigma / 0.2309; ML rows weighted real_weight vs sim_weight."),
+    "save_state": ("Choose how much to save. Charts are slow and large; CSVs are small. ML trains a model on the result.",
+                   "Same six states as forward mode: (source PNG, analysis PNG, ML). Live mode charts the real windows "
+                   "(and simulated ones only when [live] chart_simulated_runs = true)."),
     "welcome": ("This program invents random price charts, then (optionally) checks them against real prices and "
                 "learns how volatile the invented prices should be. You answer a few questions; Enter accepts the default.",
                 "Pipeline: price_modeling.py generates data_N.csv/image_N.png -> market_analysis.py computes indicators -> "
@@ -101,11 +137,52 @@ def tut(key: str) -> None:
         print(f"\n  [{TUTORIAL_MODE} tip] {text}")
 
 
-def ask(prompt: str, key: str | None = None) -> str:
-    """input() preceded by the tutorial text for this step."""
+def choose(prompt: str, options: dict[str, object], default: str | None = None, key: str | None = None,
+           aliases: dict[str, str] | None = None):
+    """Validated menu answer (re-asks on a bad answer), preceded by the tutorial text for this step."""
     if key:
         tut(key)
-    return input(prompt)
+    return ui.ask_choice(prompt, options, default, aliases)
+
+
+def yes_no(prompt: str, default: bool | None, key: str | None = None) -> bool:
+    if key:
+        tut(key)
+    return ui.ask_yes_no(prompt, default)
+
+
+def number(prompt: str, lo: float, hi: float, integer: bool = False, default: float | None = None,
+           key: str | None = None, what: str = "value"):
+    if key:
+        tut(key)
+    return ui.ask_number(prompt, lo, hi, integer, default, what)
+
+
+ASSET_TYPES = ("forex", "futures", "stock", "crypto", "index", "etf", "other")
+ASSET_ALIASES = {"fx": "forex", "currency": "forex", "currencies": "forex", "future": "futures",
+                 "equity": "stock", "stocks": "stock", "share": "stock", "shares": "stock",
+                 "cryptocurrency": "crypto", "indices": "index", "fund": "etf"}
+INSTRUMENT_PATTERN = r"[A-Za-z0-9^=./_\-]{1,24}"
+INSTRUMENT_HINT = "letters, digits and ^ = . / - _ only, e.g. SAP, GBP/USD, ^GSPC, ES=F, BTC-USD"
+
+
+def parse_asset_type(raw: str) -> str:
+    key = ASSET_ALIASES.get(raw.lower(), raw.lower())
+    if key not in ASSET_TYPES:
+        raise ValueError(f"'{raw}' is not an asset type - choose {' / '.join(ASSET_TYPES)}")
+    return key
+
+
+_VOL_WARNINGS: set[tuple[str, str]] = set()
+
+
+def guard_vol(value: float, source: str) -> float:
+    """Every vol_index that reaches the generator passes here: clamped into [limits], never NaN/inf."""
+    vol, why = clamp_vol_index(value, CFG)
+    if why and (source, why) not in _VOL_WARNINGS:
+        _VOL_WARNINGS.add((source, why))
+        ui.warn(f"{source}: {why} (config.toml [limits])")
+    return vol
 
 # ─── Timeframe configuration ──────────────────────────────────────────────────
 #
@@ -153,13 +230,13 @@ TIMEFRAME_CONFIG: dict = {
 # so, for example, a 1d chart gives 96 candles at 15m, 48 at 30m, 24 at 1h.
 # Keep the default for stocks: Yahoo only has stock prices during market hours, so a
 # 24-hour simulated day would leave most backtest candles without real data.
-SESSION_START_HOUR = 9
-SESSION_MINUTES    = 540
+SESSION_START_HOUR = int(CFG["session"]["start_hour"])      # config.toml [session]
+SESSION_MINUTES    = int(CFG["session"]["minutes"])
 
-# Candle-count guide-rails shown in the interval menu.
-MIN_CANDLES_ANALYSIS = 12    # analysis needs SMA 12 -> fewer candles cannot be analysed
-MIN_CANDLES_MACD     = 35    # MACD 12-26 + 9 signal needs 35 candles to complete
-MAX_CANDLES_COMFY    = 100   # beyond this the chart gets crowded
+# Candle-count guide-rails shown in the interval menu (derived from config.toml [indicators]).
+MIN_CANDLES_ANALYSIS = int(CFG["indicators"]["slow_sma"])  # analysis needs the slow SMA -> fewer candles cannot be analysed
+MIN_CANDLES_MACD     = int(CFG["indicators"]["macd_slow"]) + int(CFG["indicators"]["macd_signal"])  # MACD signal completes
+MAX_CANDLES_COMFY    = int(CFG["session"]["max_candles_comfy"])   # beyond this the chart gets crowded
 
 VALID_TIMEFRAMES = set(TIMEFRAME_CONFIG)
 
@@ -175,13 +252,13 @@ VALID_TIMEFRAMES = set(TIMEFRAME_CONFIG)
 #   flat. True  -> use change / sqrt(trading days in the span), which is the
 #   formula's native scale and is identical to the raw value for 1d (default).
 #   False -> feed the raw period % change straight into the formula.
-SCALE_PERIOD_CHANGE_TO_DAILY = True
+SCALE_PERIOD_CHANGE_TO_DAILY = bool(CFG["session"]["scale_period_change_to_daily"])
 # BACKTEST_POINT_IN_TIME_CHANGE
 #   True  -> each backtest cycle uses the same-length period that ENDED just
 #            before the cycle began, so the simulation never sees the outcome it
 #            is later scored against (default).
 #   False -> every cycle uses the change measured up to today, like forward runs.
-BACKTEST_POINT_IN_TIME_CHANGE = True
+BACKTEST_POINT_IN_TIME_CHANGE = bool(CFG["session"]["backtest_point_in_time_change"])
 
 
 def normalise_timeframe(raw: str) -> str | None:
@@ -318,7 +395,7 @@ def bars_for(timeframe: str, interval: str, ref_today: date | None = None) -> in
 def candle_notes(count: int) -> str:
     """Short guidance for a candle count (empty when it is comfortably in range)."""
     if count < MIN_CANDLES_ANALYSIS:
-        return f"too few: SMA 12 needs {MIN_CANDLES_ANALYSIS} (not selectable)"
+        return f"too few: SMA {MIN_CANDLES_ANALYSIS} needs {MIN_CANDLES_ANALYSIS} (not selectable)"
     if count < MIN_CANDLES_MACD:
         return f"under {MIN_CANDLES_MACD}: MACD signal line will not complete"
     if count > MAX_CANDLES_COMFY:
@@ -330,27 +407,28 @@ def choose_interval(timeframe: str) -> str:
     """Show the interval menu for a timeframe and return the chosen interval key."""
     cfg = TIMEFRAME_CONFIG[timeframe]
     default = cfg["default_interval"]
-    print(f"\nCandle interval for {timeframe} ({cfg['span_text']}).")
-    print(f"About 30-100 candles gives SMA 12, Bollinger 20 and the MACD signal (35) enough history:")
-    for key in cfg["intervals"]:
-        count = bars_for(timeframe, key)
-        note = candle_notes(count)
-        tags = ("  <- default" if key == default else "") + (f"   [{note}]" if note else "")
-        print(f"  {key:<5} {interval_label(key):<20} {count:>4} candles{tags}")
-    while True:
-        tut("interval")
-        raw = input(f"Candle interval [{default}]: ")
+    ui.section(f"Candle interval for {timeframe} ({cfg['span_text']})")
+    ui.note(f"About 30-{MAX_CANDLES_COMFY} candles gives SMA {MIN_CANDLES_ANALYSIS}, Bollinger "
+            f"{CFG['indicators']['bollinger_window']} and the MACD signal ({MIN_CANDLES_MACD}) enough history.")
+    ui.table([[key, interval_label(key), str(bars_for(timeframe, key)), "default" if key == default else "",
+               candle_notes(bars_for(timeframe, key))] for key in cfg["intervals"]],
+             ["interval", "candle", "candles", "", "note"], "llrll")
+
+    def parse(raw: str) -> str:
         key = normalise_interval(raw, timeframe)
         if key is None:
-            print(f"  '{raw.strip()}' is not an option. Choose from: {', '.join(cfg['intervals'])}")
-            continue
+            raise ValueError(f"'{raw}' is not an option - choose {', '.join(cfg['intervals'])}")
         count = bars_for(timeframe, key)
         if count < MIN_CANDLES_ANALYSIS:
-            print(f"  {key} gives only {count} candles; at least {MIN_CANDLES_ANALYSIS} are needed. Pick another.")
-            continue
-        note = candle_notes(count)
-        print(f"  Selected: {key} ({interval_label(key)}) -> {count} candles" + (f"  [{note}]" if note else ""))
+            raise ValueError(f"{key} gives only {count} candles; at least {MIN_CANDLES_ANALYSIS} are needed")
         return key
+
+    tut("interval")
+    key = ui.ask(f"Candle interval [{default}]: ", parse, default=default)
+    count = bars_for(timeframe, key)
+    note = candle_notes(count)
+    ui.note(f"Selected: {key} ({interval_label(key)}) -> {count} candles" + (f"  [{note}]" if note else ""), None)
+    return key
 
 
 def _next_business_day(d: date) -> date:
@@ -383,7 +461,10 @@ def period_start_for_cycle(
     end from sim_start + a fixed number of bars.
     """
     if timeframe == "1d":
-        end_ref = _prev_business_day(ref_today - timedelta(days=cycle_x - 1))
+        # Step back trading days, not calendar days: Saturday and Sunday used to snap to Friday, so every
+        # weekend produced three identical cycles (the same Friday scored three times).
+        # BDay offset instead of building the whole bdate_range: O(1) per cycle, same date.
+        end_ref = (pd.Timestamp(_prev_business_day(ref_today)) - pd.offsets.BDay(cycle_x - 1)).date()
         return end_ref, None
 
     elif timeframe == "5d":
@@ -508,50 +589,7 @@ def build_timestamps(
     ]
 
 
-# ─── Instrument setup ─────────────────────────────────────────────────────────
-tut("welcome")
-asset_type = ask(
-    "Asset type [forex/futures/stock/crypto/other] (default forex): ", "asset_type"
-).strip().lower() or "forex"
-ticker_name = ask(
-    "Instrument or pair to simulate: ", "instrument"
-).strip() or "GBP/USD"
-
-price_option = ask(
-    f"Starting price: [1] enter manually or [2] use current {ticker_name}? ", "start_price"
-).strip()
-if price_option == "2":
-    if asset_type == "forex":
-        default_price_symbol = ticker_name.upper().replace("/", "") + "=X"
-    else:
-        default_price_symbol = ticker_name
-    price_symbol = input(
-        f"Yahoo Finance symbol for {ticker_name} [{default_price_symbol}]: "
-    ).strip() or default_price_symbol
-    price_data = price_open.get_starting_price(price_symbol)
-    if isinstance(price_data, dict):
-        starting_price = float(price_data["current"])
-    else:
-        print(f"Could not get {ticker_name} price: {price_data}")
-        exit()
-else:
-    starting_price = float(input("Starting price: "))
-
-# Symbol shown on the analysis / backtest plots and used to pull real prices for
-# backtests: the Yahoo Finance symbol typed at the prompt above (or its default).
-# If the prompt was skipped (manual starting price), derive it from the
-# instrument name using the same mapping price_change.py uses.
-try:
-    from .price_change import _yfinance_symbol
-except ImportError:
-    from price_change import _yfinance_symbol
-
-if price_option == "2":
-    chart_symbol = _yfinance_symbol(price_symbol, asset_type)
-else:
-    chart_symbol = _yfinance_symbol(ticker_name, asset_type)
-
-# ─── Directory setup (idea 83: folders are created when missing) ──────────────
+# ─── Folders, seed and run-wide helpers (nothing is asked here) ───────────────
 master_dir   = os.path.dirname(os.path.abspath(__file__))
 results_dir  = os.path.join(master_dir, "looped_results")
 analysis_dir = os.path.join(master_dir, "looped_analysis")
@@ -564,7 +602,7 @@ for folder, label in [(results_dir, "Output"), (analysis_dir, "Analysis output")
         else:
             print(f"{label} folder does not exist: {folder}")
             print("Create the folder manually (or set [storage] auto_create_folders = true in config.toml).")
-            exit()
+            sys.exit(1)
 
 
 def clear_generated_files(directory, patterns, keep=bc.PERSISTENT_FILES):
@@ -575,38 +613,83 @@ def clear_generated_files(directory, patterns, keep=bc.PERSISTENT_FILES):
                 path.unlink()
 
 
-# ─── Timeframe selection ──────────────────────────────────────────────────────
-print("\nAvailable timeframes:")
-for tf, cfg in TIMEFRAME_CONFIG.items():
-    print(f"  {tf:<4} — {cfg['description']}")
-tut("timeframe")
-tf_raw    = input("Timeframe [5d]: ").strip() or "5d"
-timeframe = normalise_timeframe(tf_raw)
-while timeframe is None:
-    print(f"  '{tf_raw}' is not a valid timeframe. Choose from: {', '.join(VALID_TIMEFRAMES)}")
-    tf_raw    = input("Timeframe [5d]: ").strip() or "5d"
-    timeframe = normalise_timeframe(tf_raw)
-print(f"  Selected: {timeframe} — {TIMEFRAME_CONFIG[timeframe]['description']}")
+def clear_all_generated() -> None:
+    clear_generated_files(results_dir,  ("data_*.csv", "image_*.png"))
+    # the learned-vol memory files and live_scan_history.csv are kept (PERSISTENT_FILES)
+    clear_generated_files(analysis_dir, ("*.csv", "*.png", "live_scan.html"))
 
-# Use real-time date whenever backtesting is not active.
-today = date.today()
 
-# ─── Simulation parameters ────────────────────────────────────────────────────
+def archive_results() -> None:
+    """Zip the per-run CSV/PNG files (about 10x smaller than loose files, far faster to sync or commit)."""
+    storage = CFG["storage"]
+    target = Path(storage["archive_dir"]) if storage["archive_dir"] else Path(master_dir)
+    target.mkdir(parents=True, exist_ok=True)
+    safe_name = "".join(ch if ch.isalnum() else "_" for ch in ticker_name)
+    archive_path = target / f"looped_results_{safe_name}_{pd.Timestamp.now():%Y%m%d_%H%M%S}.zip"
+    members = [p for p in Path(results_dir).iterdir()
+               if p.is_file() and (storage["keep_png"] or p.suffix.lower() != ".png")]
+    with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as bundle:
+        for path in members:
+            bundle.write(path, path.name)
+    loose = sum(p.stat().st_size for p in members)
+    print(f"Archived {len(members):,} files ({loose / 1e6:.1f} MB loose) -> {archive_path} "
+          f"({archive_path.stat().st_size / 1e6:.1f} MB)")
+    if storage["delete_loose_after_archive"]:
+        for path in members:
+            path.unlink()
+        print("  loose files removed (set delete_loose_after_archive = false to keep them).")
+
+
+def finish_run(ml_dir: Path | None = None) -> None:
+    """HTML report, optional archive and the list of everything written (shared by every mode)."""
+    report = None
+    try:
+        from ml_model import write_html_report
+        report = write_html_report(analysis_dir, ml_dir)
+    except Exception as error:
+        ui.warn(f"HTML report skipped ({type(error).__name__}: {error})")
+    if ARGS.archive or CFG["storage"]["archive_after_run"]:
+        archive_results()
+    results, analysis = Path(results_dir), Path(analysis_dir)
+    ui.section("Outputs")
+    ui.manifest({
+        "run CSVs": sorted(results.glob("data_*.csv")),
+        "source charts": sorted(results.glob("image_*.png")),
+        "analysis charts": sorted(analysis.glob("image_*_analysis.png")),
+        "contact sheets": sorted(analysis.glob("all_*contact_sheet*.png")),
+        "analysis tables": sorted(p for p in analysis.glob("*.csv") if p.name not in bc.PERSISTENT_FILES),
+        "live market page": [analysis / "live_scan.html", analysis / "live_overview.png"],
+        "HTML report": [Path(report)] if report else [],
+        "ML results": sorted(p for p in Path(ml_dir).rglob("*") if p.is_file()) if ml_dir else [],
+    }, Path(master_dir))
+    ui.note(f"Random seed {RUN_SEED}: re-run with --seed {RUN_SEED} to reproduce it.")
+
+
 # A random seed between -10,000,000 and 10,000,000 is drawn for every run and shown; pass it back with
 # --seed N to reproduce the run exactly (the engine's numpy seed is derived from it).
-RUN_SEED = ARGS.seed if ARGS.seed is not None else secrets.SystemRandom().randint(-10_000_000, 10_000_000)
+RUN_SEED = ARGS.seed if ARGS.seed is not None else secrets.SystemRandom().randint(-SEED_LIMIT, SEED_LIMIT)
 rand.seed(RUN_SEED)
-ENGINE_SEED = (RUN_SEED + 10_000_000) % (2 ** 32)
-print(f"\nRandom seed for this run: {RUN_SEED}   (re-run with --seed {RUN_SEED} to reproduce it)")
+ENGINE_SEED = (RUN_SEED + SEED_LIMIT) % (2 ** 32)
+today = date.today()
 
-# Retired manual volatility prompt:
-# question = float(input("\nVolatility of market: "))
 try:
-    from .price_change import get_timeframe_change_details, get_regime
+    from .price_change import _yfinance_symbol, _daily_closes, get_timeframe_change_details, get_regime
 except ImportError:
-    from price_change import get_timeframe_change_details, get_regime
+    from price_change import _yfinance_symbol, _daily_closes, get_timeframe_change_details, get_regime
 
-import math
+memory = bc.VolMemory(analysis_dir)
+VOL_SOURCE = CFG["volatility"]["source"]                 # realized | formula (config.toml [volatility])
+SIGMA_PER_VOL = 0.4 / math.sqrt(3.0)                     # per-candle % sigma of the generator per unit vol_index
+SEARCH_METHODS = ["auto", "step", "bisect", "grid", "coarse_fine", "cobyla", "bayes", "ga", "mc"]
+EARLIEST_DATA = date(1970, 1, 1)           # Yahoo has nothing older; cycles before this cannot be scored
+OUTPUT_MODES = {  # (source PNGs, analysis PNGs, ML)
+    "1": (True,  True,  False, "Source + analysis charts"),
+    "2": (True,  True,  True,  "Source + analysis charts + ML (longest processing time)"),
+    "3": (False, True,  True,  "Analysis charts + ML (no source charts)"),
+    "4": (False, True,  False, "Analysis charts only (no source charts or ML)"),
+    "5": (False, False, True,  "ML only (no charts; required analysis metrics are still calculated)"),
+    "6": (False, False, False, "CSVs + metrics only (no charts or ML; fastest) [default]"),
+}
 
 _change_cache: dict = {}
 
@@ -667,34 +750,6 @@ def vol_from_market_change(change_pct: float) -> float:
     else:
         vol = 99.81711 / (1 + math.exp(formula_exponent))
     return vol * 8
-
-
-try:
-    market_change_pct, change_info = market_change_input(timeframe)
-    print(f"Yahoo {describe_change(timeframe, market_change_pct, change_info)}")
-except ValueError as error:
-    # Not enough history for this span. A backtest may use a different timeframe
-    # or earlier windows, so only stop later if the value is actually needed.
-    print(f"Warning: could not measure the {timeframe.upper()} change for {ticker_name} up to today: {error}")
-except Exception as error:  # network / Yahoo failure: nothing can run
-    raise SystemExit(
-        f"Could not get Yahoo Finance {timeframe.upper()} change for {ticker_name} ({chart_symbol}): {error}"
-    )
-# Note: vol_index is computed per run (below) from the timeframe's % change.
-# The Yahoo history is downloaded once and cached, so there are no repeated
-# network calls.
-
-tut("price_mode")
-price_mode = input(
-    "Price behaviour: [1] allow negative futures prices or [2] floor prices at zero? "
-).strip().lower()
-if price_mode in ("1", "futures"):
-    allow_negative = True
-elif price_mode in ("2", "floor"):
-    allow_negative = False
-else:
-    print("Choose 1 (allow negative) or 2 (floor at zero).")
-    exit()
 
 
 # ─── Genetic algorithm over timeframe + candle interval ───────────────────────
@@ -782,135 +837,460 @@ def ga_timeframe_interval(n_cycles: int = 3, population: int = 8, generations: i
     return best
 
 
-# ─── Backtest OR forward simulation ──────────────────────────────────────────
-tut("backtest")
-backtest = ask("\nEnable backtesting? (y/n) [n]: ").strip().lower() in ("y", "yes")
-self_correct = False
-sc_method = VOLATILITY_SEARCH["method"]
-sc_loops = int(VOLATILITY_SEARCH["loops"])
-SEARCH_METHODS = ["auto", "step", "bisect", "grid", "coarse_fine", "cobyla", "bayes", "ga", "mc"]
 
-if backtest:
-    print(f"\nBacktest timeframes: {', '.join(VALID_TIMEFRAMES)}")
-    ga_choice = ask("Let a genetic algorithm search the best timeframe + candle interval? (y/n) [n]: ",
-                    "ga_timeframe").strip().lower() in ("y", "yes")
-    picked = ga_timeframe_interval() if ga_choice else None
-    if picked:
-        tf_bt, backtest_interval = picked
-        print(f"  Using the GA's choice: {tf_bt} / {backtest_interval}")
-    else:
-        if ga_choice:
-            print("  The search found no usable pair (no real data); choose manually.")
-        tf_bt_raw = input(f"Backtest timeframe [{timeframe}]: ").strip() or timeframe
-        tf_bt     = normalise_timeframe(tf_bt_raw)
-        while tf_bt is None:
-            print(f"  Invalid. Choose from: {', '.join(VALID_TIMEFRAMES)}")
-            tf_bt_raw = input(f"Backtest timeframe [{timeframe}]: ").strip() or timeframe
-            tf_bt     = normalise_timeframe(tf_bt_raw)
-
-        backtest_interval = choose_interval(tf_bt)
-    print(
-        f"\n  Cycle 1 = most recent {tf_bt} period ending {today}.\n"
-        f"  Cycle N = oldest.  All cycles use {bars_for(tf_bt, backtest_interval, today)} candles "
-        f"× {interval_label(backtest_interval)}."
-    )
-    try:
-        cycles = int(ask("Number of backtest cycles: ", "cycles").strip())
-    except ValueError:
-        print("Enter a whole number ≥ 1.")
-        exit()
-    if cycles < 1:
-        print("Cycles must be ≥ 1.")
-        exit()
-
-    run_count   = cycles
-    sim_windows: list[tuple[date, date | None]] = []
-    # Build oldest→newest so run 1 = oldest cycle
-    for x in range(cycles, 0, -1):
-        s, e = period_start_for_cycle(tf_bt, x, today)
-        sim_windows.append((s, e))
-
-    print(f"\n  Backtest schedule ({cycles} cycles, oldest first):")
-    for i, (s, e) in enumerate(sim_windows, start=1):
-        end_str = str(e) if e else f"+ {bars_for(tf_bt, backtest_interval, today)} bars"
-        print(f"    Cycle {i}: {s}  →  {end_str}")
-
-    backtest_timeframe = tf_bt
-
-    if VOLATILITY_SEARCH["enabled"]:
-        raw = ask("\nSelf-correct the volatility against the real prices? (y/n) [y]: ", "self_correct").strip().lower()
-        self_correct = raw in ("", "y", "yes")
-        if self_correct:
-            print(f"  Search methods: {', '.join(SEARCH_METHODS)}")
-            raw_method = ask(f"  Search method [{sc_method}]: ", "method").strip().lower() or sc_method
-            sc_method = raw_method if raw_method in SEARCH_METHODS else sc_method
-            try:
-                sc_loops = max(1, int(ask(f"  Learning loops [{sc_loops}]: ", "loops").strip() or sc_loops))
-            except ValueError:
-                print(f"  Not a number; keeping {sc_loops}.")
-
-else:
-    backtest_timeframe = timeframe
-    backtest_interval  = choose_interval(backtest_timeframe)
-    sim_windows = []
-    plot_mode   = ask("\nCreate [1] one plot or [M] many plots? ", "plot_mode").strip().lower()
-    if plot_mode in ("1", "one", "single"):
-        run_count = 1
-    elif plot_mode in ("m", "many"):
+def max_feasible_cycles(tf: str) -> int:
+    """Largest cycle count whose oldest window still starts after 1970 (capped by [limits] max_cycles)."""
+    def fits(x: int) -> bool:
         try:
-            run_count = int(input("How many plots? "))
-        except ValueError:
-            print("Enter a whole number greater than zero.")
-            exit()
-        if run_count < 1:
-            print("Enter a whole number greater than zero.")
-            exit()
+            return period_start_for_cycle(tf, x, today)[0] >= EARLIEST_DATA
+        except (ValueError, OverflowError):
+            return False
+    lo, hi = 1, int(LIMITS["max_cycles"])
+    if fits(hi):
+        return hi
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        lo, hi = (mid, hi) if fits(mid) else (lo, mid - 1)
+    return lo
+
+
+
+def stored_learned_vol(tf: str, interval: str) -> float | None:
+    """The vol_index a previous self-correction learned for this market (None when absent or out of [limits])."""
+    row = memory.global_row(ticker_name, asset_type, tf, interval)
+    value = pd.to_numeric(pd.Series([row.get("learned_vol") if row is not None else None]), errors="coerce").iloc[0]
+    if row is None or not np.isfinite(value):
+        return None
+    if not LIMITS["vol_index_min"] <= float(value) <= LIMITS["vol_index_max"]:
+        ui.warn(f"Stored learned vol_index {float(value):.4g} is outside config.toml [limits] - ignored.")
+        return None
+    return float(value)
+
+
+# ─── Starting volatility of every run (config.toml [volatility] source) ───────
+_real_windows: dict[int, tuple] = {}
+_history_cache: dict = {}
+
+
+def _cached_history(symbol, interval_, start_, end_):
+    key = (symbol, interval_, str(start_.date()), str(end_.date()))
+    if key not in _history_cache:
+        _history_cache[key] = bc._fetch_history(symbol, interval_, start_, end_)
+    return _history_cache[key]
+
+
+def real_window(x: int) -> tuple:
+    """(aligned real candles, Yahoo interval, note) of window x: 1 = the latest window ending today,
+    2 = the one before it ... (the same windows, candles and alignment the backtest scores against)."""
+    if x not in _real_windows:
+        try:
+            s_, e_ = period_start_for_cycle(backtest_timeframe, x, today)
+            ts_ = pd.DatetimeIndex(build_timestamps(backtest_timeframe, s_, e_, backtest_interval))
+            _real_windows[x] = bc.fetch_real_for_cycle(chart_symbol, _spec, ts_, today, _cached_history)
+        except Exception as error:                     # too old for Yahoo, network, calendar edge ...
+            _real_windows[x] = (None, "", f"{type(error).__name__}: {error}")
+    return _real_windows[x]
+
+
+def daily_sigma_for_candle(as_of: date) -> float:
+    """Fallback: realized daily volatility from the closes BEFORE `as_of`, scaled to one simulated candle."""
+    try:
+        closes = _daily_closes(chart_symbol, asset_type)
+    except Exception:
+        return float("nan")
+    window = closes[closes.index < pd.Timestamp(as_of)].tail(int(CFG["volatility"]["daily_lookback"]) + 1)
+    window = window[window > 0]
+    if len(window) < 6:
+        return float("nan")
+    sigma_daily = float(100.0 * np.log(window).diff().dropna().std(ddof=1))
+    if _spec["kind"] == "intraday":
+        scale = math.sqrt(_spec["minutes"] / SESSION_MINUTES)
+    elif _spec["kind"] == "bday":
+        scale = math.sqrt(_spec.get("days") or max(1.0, ytd_business_days(today) / 50.0))
     else:
-        print("Choose 1 for one plot or M for many plots.")
-        exit()
+        scale = math.sqrt(5.0 * _spec["weeks"])
+    return sigma_daily * scale
 
-# ─── Output mode (applies to both paths when run_count ≥ 100) ─────────────────
-render_analysis_charts = True
-render_source_charts   = True
-run_ml = False
 
+def starting_vol(x_previous: int, sim_start: date, sim_end: date | None, recal: bool = False) -> tuple[float, str]:
+    """(vol_index, where it came from) for one simulated window.
+
+    realized: per-candle volatility of the REAL window just before this one (x_previous), same candle size,
+              so a backtest cycle never sees its own prices; then daily closes before it; then the formula.
+    formula:  the original market-change sigmoid (lopsided and blind to the candle size).
+    """
+    if VOL_SOURCE == "realized":
+        real, used, _ = real_window(x_previous)
+        if real is not None and x_previous >= 2:
+            # 1m / 3m: 22 or 65 trading days do not always fill the calendar month or quarter, so the window
+            # before can end ON this window's first day. Keep only candles before it, or the cycle sees its own prices.
+            cut = pd.Timestamp(sim_start)
+            if getattr(real.index, "tz", None) is not None:
+                cut = cut.tz_localize(real.index.tz)
+            real = real[real.index < cut]
+        sigma = bc.bar_sigma_pct(real)
+        if np.isfinite(sigma) and sigma > 0:
+            return (guard_vol(sigma / SIGMA_PER_VOL, "realized volatility"),
+                    f"real {used} candles of the window before (sigma {sigma:.3f}% per candle)")
+        sigma = daily_sigma_for_candle(sim_start)
+        if np.isfinite(sigma) and sigma > 0:
+            return (guard_vol(sigma / SIGMA_PER_VOL, "realized volatility"),
+                    f"daily closes before {sim_start}, scaled to one candle (sigma {sigma:.3f}%)")
+    if recal:
+        span = (sim_end - sim_start).days if (backtest_timeframe == "ytd" and sim_end) else None
+        change, details = market_change_input(backtest_timeframe, as_of=sim_start, span_days=span)
+    else:
+        change, details = run_market_change(backtest_timeframe, sim_start, sim_end)
+    return guard_vol(vol_from_market_change(change), "market-change formula"), describe_change(backtest_timeframe, change, details)
+
+
+# ─── Answer parsers ───────────────────────────────────────────────────────────
+MODE_OPTIONS = {"1": "backtest", "2": "forward", "3": "live"}
+MODE_ALIASES = {"backtest": "1", "b": "1", "forward": "2", "f": "2", "simulate": "2",
+                "live": "3", "current": "3", "l": "3", "c": "3"}
+
+
+def parse_mode(raw: str) -> tuple[str | None, str | None]:
+    """(mode, asset_type). An asset type here means an answer file written for the old prompt order."""
+    key = MODE_ALIASES.get(raw.lower(), raw.lower())
+    if key in MODE_OPTIONS:
+        return MODE_OPTIONS[key], None
+    try:
+        return None, parse_asset_type(raw)
+    except ValueError:
+        raise ValueError(f"'{raw}' is not a mode - choose 1 (backtest), 2 (forward simulation) "
+                         f"or 3 (current market data)") from None
+
+
+def parse_instrument(raw: str) -> str:
+    if re.fullmatch(INSTRUMENT_PATTERN, raw) is None or ".." in raw or raw[0] in "./" or raw[-1] in "./":
+        raise ValueError(f"'{raw}' is not a valid instrument ({INSTRUMENT_HINT})")
+    return raw
+
+
+def parse_timeframe(raw: str, allow_ga: bool = False) -> str:
+    if allow_ga and raw.lower() in ("ga", "genetic", "auto"):
+        return "ga"
+    key = normalise_timeframe(raw)
+    if key is None:
+        raise ValueError(f"'{raw}' is not a valid timeframe - choose {', '.join(TIMEFRAME_CONFIG)}"
+                         + (" or ga" if allow_ga else ""))
+    return key
+
+
+# ─── One function per question ────────────────────────────────────────────────
+def ask_start_price(default: str | None) -> tuple[float, str, str]:
+    """(starting price, Yahoo symbol for real prices, how the price was chosen)."""
+    tut("start_price")
+    hint = f" [{default}]" if default else ""
+    option = choose(f"Starting price: [1] enter manually or [2] use current {ticker_name}?{hint} ",
+                    {"1": "1", "2": "2"}, default=default, aliases={"manual": "1", "current": "2"})
+    if option == "2":
+        default_symbol = ticker_name.upper().replace("/", "") + "=X" if asset_type == "forex" else ticker_name
+        symbol = ui.ask(f"Yahoo Finance symbol for {ticker_name} [{default_symbol}]: ", parse_instrument,
+                        default=default_symbol)
+        price_data = price_open.get_starting_price(symbol)
+        if not isinstance(price_data, dict):
+            sys.exit(f"Could not get {ticker_name} price: {price_data}")
+        price = float(price_data["current"])
+        if not (math.isfinite(price) and LIMITS["start_price_min"] <= price <= LIMITS["start_price_max"]):
+            sys.exit(f"Yahoo returned an unusable price for {symbol}: {price!r}")
+        return price, _yfinance_symbol(symbol, asset_type), f"current {symbol} price"
+    price = number("Starting price: ", LIMITS["start_price_min"], LIMITS["start_price_max"], what="starting price")
+    return price, _yfinance_symbol(ticker_name, asset_type), "entered"
+
+
+def ask_price_model() -> bool:
+    """True = negative prices allowed (futures); False = prices kept above zero."""
+    return choose("Price model: [1] allow negative prices (futures) or [2] keep prices above zero? [2]: ",
+                  {"1": True, "2": False}, default="2", key="price_mode",
+                  aliases={"futures": "1", "negative": "1", "floor": "2", "positive": "2"})
+
+
+def show_timeframes() -> None:
+    ui.table([[tf, cfg["description"]] for tf, cfg in TIMEFRAME_CONFIG.items()], ["timeframe", "default candles"], "ll")
+
+
+def ask_timeframe(prompt: str, default: str, allow_ga: bool = False) -> str:
+    tut("timeframe")
+    picked = ui.ask(prompt, lambda raw: parse_timeframe(raw, allow_ga), default=default)
+    if picked != "ga":
+        ui.note(f"Selected: {picked} — {TIMEFRAME_CONFIG[picked]['description']}", None)
+    return picked
+
+
+def ask_cycles(tf: str) -> int:
+    cap = max_feasible_cycles(tf)
+    return number(f"Number of backtest cycles (1-{cap:,}): ", 1, cap, integer=True, key="cycles",
+                  what="number of cycles")
+
+
+def ask_learning() -> tuple[bool, str, int]:
+    """(self-correct, search method, learning loops)."""
+    method, loops = VOLATILITY_SEARCH["method"], int(VOLATILITY_SEARCH["loops"])
+    if not VOLATILITY_SEARCH["enabled"]:
+        return False, method, loops
+    if not yes_no("Self-correct the volatility against the real prices? (y/n) [y]: ", True, key="self_correct"):
+        return False, method, loops
+    ui.note(f"Search methods: {', '.join(SEARCH_METHODS)}", None)
+    method = choose(f"  Search method [{method}]: ", {m: m for m in SEARCH_METHODS}, default=method, key="method")
+    loops = min(loops, int(LIMITS["max_loops"]))
+    loops = number(f"  Learning loops (1-{LIMITS['max_loops']}) [{loops}]: ", 1, LIMITS["max_loops"], integer=True,
+                   default=loops, key="loops", what="learning loops")
+    return True, method, int(loops)
+
+
+def ask_run_count() -> int:
+    plot_mode = choose("Create [1] one plot or [M] many plots? ", {"1": "one", "m": "many"}, key="plot_mode",
+                       aliases={"one": "1", "single": "1", "many": "m"})
+    if plot_mode == "one":
+        return 1
+    return int(number(f"How many plots? (1-{LIMITS['max_runs']:,}) ", 1, LIMITS["max_runs"], integer=True,
+                      what="number of plots"))
+
+
+def ask_use_learned_vol(tf: str, interval: str) -> bool:
+    """Forward runs only: offered when a previous self-correction stored a vol_index for this market."""
+    if ARGS.vol_index is not None:
+        return False
+    learned = stored_learned_vol(tf, interval)
+    row = memory.global_row(ticker_name, asset_type, tf, interval)
+    if learned is None:
+        if not ((ARGS.auto_recal or VOLATILITY_SEARCH["auto_recalibrate"]) and row is None):
+            return False
+        # Never calibrated + auto-recalibration on: the recalibration before the run stores one. The original
+        # order asked after it, so old answer files expect this question here.
+        return yes_no("A recalibration will learn a volatility for this market before the run. Use it instead of "
+                      "the starting-volatility source? (y/n) [y]: ", True, key="learned_vol")
+    return yes_no(f"A learned volatility exists for this market (vol_index {learned:.3f}, saved "
+                  f"{str(row.get('updated'))[:10]}). Use it instead of the starting-volatility source? (y/n) [y]: ",
+                  True, key="learned_vol")
+
+
+def ask_outputs(count: int) -> tuple[bool, bool, bool | None]:
+    """(source PNGs, analysis PNGs, ML) for >= 100 runs; below that every chart is drawn and ML is asked."""
+    if count < 100:
+        return True, True, None
+    if ARGS.save_state:
+        source, analysis, ml, text = OUTPUT_MODES[str(ARGS.save_state)]
+        ui.note(f"Save state {ARGS.save_state} (--save-state): {text}", None)
+        return source, analysis, ml
+    ui.note("Source PNGs: the OHLC chart of each run. Analysis PNGs: the indicator and trade chart of each run.")
+    ui.note("Per-run CSVs and combined analysis metrics are always saved.")
+    ui.table([[key, text] for key, (*_, text) in OUTPUT_MODES.items()], ["", "save state"], "ll")
+    picked = choose("Choose 1-6 [6]: ", {key: key for key in OUTPUT_MODES}, default="6", key="output_mode")
+    source, analysis, ml, _ = OUTPUT_MODES[picked]
+    return source, analysis, ml
+
+
+def ask_keep_history() -> bool:
+    """config.toml [ml] keep_history = "ask": asked here, before the run, instead of in the middle of the ML step."""
+    setting = CFG["ml"]["keep_history"]
+    if setting != "ask":
+        return setting == "yes"
+    return yes_no("[ML] Keep analysis data across Python runs? (y = accumulate, n = clear history) [n]: ", False)
+
+
+# ─── The questions, in order (every input of options 1 and 2 is asked here) ──
+ui.banner("Price modelling", "All questions come first; the run then goes from start to finish without stopping.")
+tut("welcome")
+
+# Step 1 - mode
+if ARGS.mode:
+    MODE, _legacy_asset = ARGS.mode, None
+else:
+    ui.section("Step 1 · Mode")
+    ui.table([["1", "Backtest", "replay past windows and score the simulation against real Yahoo prices"],
+              ["2", "Forward simulation", "invent future prices from today (the random model)"],
+              ["3", "Current market data", "real Yahoo candles for 1d ... max, the live scan, simulated futures"]],
+             ["", "mode", "what it does"], "lll")
+    tut("mode")
+    MODE, _legacy_asset = ui.ask("Mode [2]: ", parse_mode, default="2")
+# Old answer files start with the asset type: they keep the old order and pick the mode at "Enable backtesting?".
+LEGACY_ORDER = MODE is None
+
+# Step 2 - instrument
+try:
+    if ARGS.asset_type:
+        asset_type = parse_asset_type(ui.clean_answer(ARGS.asset_type))
+    if ARGS.instrument:
+        ticker_name = parse_instrument(ui.clean_answer(ARGS.instrument))
+except ValueError as _error:
+    sys.exit(f"Command line: {_error}")
+if not (ARGS.asset_type and ARGS.instrument) and not LEGACY_ORDER:
+    ui.section("Step 2 · Instrument")
+if not ARGS.asset_type:
+    if _legacy_asset:
+        asset_type = _legacy_asset
+    else:
+        tut("asset_type")
+        asset_type = ui.ask(f"Asset type [{'/'.join(ASSET_TYPES)}] (default forex): ", parse_asset_type, default="forex")
+if not ARGS.instrument:
+    tut("instrument")
+    ticker_name = ui.ask("Instrument or pair to simulate : ", parse_instrument, default="GBP/USD")
+
+# Option 3: one more question, then it runs ------------------------------------
+if MODE == "live":
+    import live_market
+    chart_symbol = _yfinance_symbol(ticker_name, asset_type)
+    if ARGS.save_state:
+        save_state = ARGS.save_state
+    else:
+        ui.section("Step 3 · Save state")
+        ui.table([[str(k), v[3]] for k, v in live_market.SAVE_STATES.items()], ["", "what is saved"], "ll")
+        default_state = int(CFG["live"]["default_save_state"])
+        save_state = number(f"Choose 1-6 [{default_state}]: ", 1, 6, integer=True, default=default_state,
+                            key="save_state", what="save state")
+    live_outcome = live_market.run_live_mode(live_market.LiveContext(
+        cfg=CFG, name=ticker_name, asset_type=asset_type, symbol=chart_symbol,
+        results_dir=Path(results_dir), analysis_dir=Path(analysis_dir), engine_seed=ENGINE_SEED,
+        base_params=bc.params_from_config(CFG, vol_index=3.6, session_start=SESSION_START_HOUR,
+                                          session_minutes=SESSION_MINUTES),
+        save_state=int(save_state), clear_outputs=clear_all_generated))
+    finish_run(live_outcome["ml_dir"])
+    ui.note(f"Live scan page: {Path(analysis_dir) / 'live_scan.html'}")
+    sys.exit(0)
+
+# Options 1 and 2 -------------------------------------------------------------------
+self_correct, sc_method, sc_loops = False, VOLATILITY_SEARCH["method"], int(VOLATILITY_SEARCH["loops"])
+render_source_charts = render_analysis_charts = True
+run_ml, use_learned_vol, ga_used, cycles = False, False, False, 0
+sim_windows: list[tuple[date, date | None]] = []
+
+if LEGACY_ORDER:
+    # The original order, unchanged, so answer files written for it keep working line for line.
+    # Blank start-price answer = manual, as in the original (any answer other than 2 was manual).
+    starting_price, chart_symbol, start_price_how = ask_start_price(default="1")
+    ui.section("Timeframe")
+    show_timeframes()
+    timeframe = ask_timeframe("Timeframe [5d]: ", "5d")
+    allow_negative = ask_price_model()
+    backtest = yes_no("\nEnable backtesting? (y/n) [n]: ", False, key="backtest")
+    if backtest:
+        ga_choice = yes_no("Let a genetic algorithm search the best timeframe + candle interval? (y/n) [n]: ", False,
+                           key="ga_timeframe")
+        picked = ga_timeframe_interval() if ga_choice else None
+        if picked:
+            backtest_timeframe, backtest_interval = picked
+            ga_used = True
+        else:
+            if ga_choice:
+                print("  The search found no usable pair (no real data); choose manually.")
+            backtest_timeframe = ask_timeframe(f"Backtest timeframe [{timeframe}]: ", timeframe)
+            backtest_interval = choose_interval(backtest_timeframe)
+        cycles = ask_cycles(backtest_timeframe)
+        self_correct, sc_method, sc_loops = ask_learning()
+        run_ml = cycles >= 10 and yes_no("\nRun ML model on these backtest cycles? (y/n) [n]: ", False, key="ml")
+    else:
+        backtest_timeframe, backtest_interval = timeframe, choose_interval(timeframe)
+        cycles = ask_run_count()
+        render_source_charts, render_analysis_charts, run_ml = ask_outputs(cycles)
+        use_learned_vol = ask_use_learned_vol(backtest_timeframe, backtest_interval)
+        if run_ml is None:
+            run_ml = yes_no("\nRun ML model on these results? (y/n) [n]: ", False, key="ml")
+else:
+    backtest = MODE == "backtest"
+    # Step 3 - the price the simulation starts from and how it may move
+    ui.section("Step 3 · Price")
+    starting_price, chart_symbol, start_price_how = ask_start_price(default="2")
+    allow_negative = ask_price_model()
+    if backtest:
+        # Step 4 - which past windows to replay
+        ui.section("Step 4 · Backtest window")
+        show_timeframes()
+        picked_tf = ask_timeframe("Backtest timeframe [5d] (or ga = let a genetic algorithm choose): ", "5d",
+                                  allow_ga=True)
+        picked = ga_timeframe_interval() if picked_tf == "ga" else None
+        if picked:
+            backtest_timeframe, backtest_interval = picked
+            ga_used = True
+        else:
+            if picked_tf == "ga":
+                print("  The search found no usable pair (no real data); choose manually.")
+                picked_tf = ask_timeframe("Backtest timeframe [5d]: ", "5d")
+            backtest_timeframe = picked_tf
+            backtest_interval = choose_interval(backtest_timeframe)
+        cycles = ask_cycles(backtest_timeframe)
+        # Step 5 - learning
+        ui.section("Step 5 · Learning")
+        self_correct, sc_method, sc_loops = ask_learning()
+        # Step 6 - after the run
+        if cycles >= 10:
+            ui.section("Step 6 · After the run")
+            run_ml = yes_no("Run the ML model on the cycles when the backtest is done? (y/n) [n]: ", False, key="ml")
+    else:
+        # Step 4 - the future window
+        ui.section("Step 4 · Forecast window")
+        show_timeframes()
+        backtest_timeframe = ask_timeframe("Timeframe [5d]: ", "5d")
+        backtest_interval = choose_interval(backtest_timeframe)
+        cycles = ask_run_count()
+        use_learned_vol = ask_use_learned_vol(backtest_timeframe, backtest_interval)
+        # Step 5 - what to save
+        ui.section("Step 5 · Outputs")
+        render_source_charts, render_analysis_charts, run_ml = ask_outputs(cycles)
+        if run_ml is None:
+            run_ml = yes_no("Run the ML model on the results when the run is done? (y/n) [n]: ", False, key="ml")
+    timeframe = backtest_timeframe
+keep_history_answer = ask_keep_history() if run_ml else None
+
+# ─── Plan: everything that was decided, shown once before the run starts ──────
+run_count = cycles
 if backtest:
-    # Backtests produce ONE combined plot (backtest_plot.png) instead of
-    # per-cycle source/analysis charts and contact sheets.
-    render_analysis_charts = False
-    render_source_charts   = False
+    render_source_charts = render_analysis_charts = False   # backtests draw ONE combined plot instead
+    for x in range(cycles, 0, -1):                          # oldest -> newest, so run 1 = oldest cycle
+        sim_windows.append(period_start_for_cycle(backtest_timeframe, x, today))
+if not backtest and ARGS.vol_index is not None:
+    vol_plan = f"fixed vol_index {ARGS.vol_index:g} (--vol-index)"
+elif use_learned_vol:
+    vol_plan = "learned vol_index from a previous self-correction (vol_equilibrium.csv)"
+elif VOL_SOURCE == "realized":
+    vol_plan = (f"realized: real {interval_label(backtest_interval)} candles of the window just before each "
+                f"{'cycle' if backtest else 'run'} (config.toml [volatility])")
+else:
+    vol_plan = "market-change formula (config.toml [volatility] source = \"formula\")"
+ui.section("Plan")
+plan_rows = [
+    ("Mode", "Backtest" if backtest else "Forward simulation"),
+    ("Instrument", f"{ticker_name} ({asset_type}) · Yahoo {chart_symbol}"),
+    ("Starting price", f"{ui.fmt_price(starting_price)} ({start_price_how})"),
+    ("Price model", "negative prices allowed (futures)" if allow_negative
+     else "kept above zero (a candle that would reach 0 loses 99% instead)"),
+    ("Window", f"{backtest_timeframe} · {bars_for(backtest_timeframe, backtest_interval, today)} candles × "
+               f"{interval_label(backtest_interval)}" + (" (chosen by the genetic search)" if ga_used else "")),
+]
+if backtest:
+    plan_rows += [("Cycles", f"{cycles} · oldest {sim_windows[0][0]} → newest {sim_windows[-1][0]}"),
+                  ("Learning", f"self-correct ({sc_method}, {sc_loops} loop{'s' if sc_loops != 1 else ''})"
+                   if self_correct else "no self-correction")]
+else:
+    saved = next((text for key, (s, a, m, text) in OUTPUT_MODES.items()
+                  if (s, a, m) == (render_source_charts, render_analysis_charts, run_ml)), "")
+    plan_rows += [("Runs", f"{run_count:,}" + (f" · save state: {saved}" if run_count >= 100 else ""))]
+plan_rows += [("Volatility", vol_plan),
+              ("ML", "no" if not run_ml else "yes, " + ("added to the stored history" if keep_history_answer
+                                                         else "history cleared first")),
+              ("Seed", f"{RUN_SEED}  (re-run with --seed {RUN_SEED})")]
+ui.kv(plan_rows)
 
-if run_count >= 100 and not backtest:
-    label = f"{'backtest cycle' if backtest else 'run'}"
-    print(f"\nChoose outputs for {run_count:,} {label}s:")
-    print("  Source PNGs: the original OHLC chart for each run.")
-    print("  Analysis PNGs: the indicator and trade chart for each run.")
-    print("  Per-run CSVs and combined analysis metrics are always saved.")
-    print("  1) Source + analysis charts")
-    print("  2) Source + analysis charts + ML (longest processing time)")
-    print("  3) Analysis charts + ML (no source charts)")
-    print("  4) Analysis charts only (no source charts or ML)")
-    print("  5) ML only (no charts; required analysis metrics are still calculated)")
-    print("  6) CSVs + metrics only (no charts or ML; fastest) [default]")
-    output_choice = ask("Choose 1-6 [6]: ", "output_mode").strip() or "6"
-    output_modes = {
-        "1": (True,  True,  False),
-        "2": (True,  True,  True),
-        "3": (False, True,  True),
-        "4": (False, True,  False),
-        "5": (False, False, True),
-        "6": (False, False, False),
-    }
-    if output_choice not in output_modes:
-        print("Choose one of the output modes 1-6.")
-        exit()
-    render_source_charts, render_analysis_charts, run_ml = output_modes[output_choice]
+# ─── Run (no more questions from here on) ─────────────────────────────────────
+if VOL_SOURCE == "formula":
+    try:
+        market_change_pct, change_info = market_change_input(timeframe)
+        print(f"Yahoo {describe_change(timeframe, market_change_pct, change_info)}")
+    except ValueError as error:
+        # Not enough history for this span. A backtest may use a different timeframe
+        # or earlier windows, so only stop later if the value is actually needed.
+        print(f"Warning: could not measure the {timeframe.upper()} change for {ticker_name} up to today: {error}")
+    except Exception as error:  # network / Yahoo failure: nothing can run
+        raise SystemExit(
+            f"Could not get Yahoo Finance {timeframe.upper()} change for {ticker_name} ({chart_symbol}): {error}"
+        )
 
-clear_generated_files(results_dir,  ("data_*.csv", "image_*.png"))
-clear_generated_files(analysis_dir, ("*.csv", "*.png"))      # the learned-vol memory files are kept (PERSISTENT_FILES)
+clear_all_generated()
+
 
 # ─── Generator, learned-volatility memory, empirical shocks ───────────────────
-memory = bc.VolMemory(analysis_dir)
 base_params = bc.params_from_config(CFG, vol_index=3.6, session_start=SESSION_START_HOUR,
                                     session_minutes=SESSION_MINUTES)
 _spec = interval_spec(backtest_timeframe, backtest_interval)
@@ -960,9 +1340,8 @@ def build_recal_contexts(n_cycles: int) -> list:
         try:
             s_, e_ = period_start_for_cycle(backtest_timeframe, x, today)
             ts_ = pd.DatetimeIndex(build_timestamps(backtest_timeframe, s_, e_, backtest_interval))
-            real_, _, _ = bc.fetch_real_for_cycle(chart_symbol, _spec, ts_, today)
-            span_ = (e_ - s_).days if (backtest_timeframe == "ytd" and e_) else None
-            change_, _ = market_change_input(backtest_timeframe, as_of=s_, span_days=span_)
+            real_, _, _ = real_window(x)
+            base_vol_, _ = starting_vol(x + 1, s_, e_, recal=True)
         except Exception as error:
             print(f"  recalibration: window {x} skipped ({type(error).__name__}: {error})")
             continue
@@ -972,7 +1351,7 @@ def build_recal_contexts(n_cycles: int) -> list:
             regime_ = "unknown"
         contexts.append(bc.CycleContext(cycle=n_cycles - x + 1, start=s_, timestamps=ts_, real=real_,
                                         intraday=IS_INTRADAY, start_price=starting_price, regime=regime_,
-                                        base_vol=vol_from_market_change(change_)))
+                                        base_vol=base_vol_))
     return contexts
 
 
@@ -1002,22 +1381,16 @@ def maybe_recalibrate() -> None:
 
 maybe_recalibrate()
 
-# Forward runs can start from the volatility a previous self-correction learned (absolute vol_index: the
-# market-change formula swings from ~0.1 to ~60 on small changes, so a ratio learned elsewhere would not transfer).
+# Forward runs can start from the volatility a previous self-correction learned (asked with the other questions;
+# re-read here because a recalibration just above may have updated it).
 learned_vol_fixed = None
-if not backtest:
-    _row = memory.global_row(ticker_name, asset_type, backtest_timeframe, backtest_interval)
-    if _row is not None and np.isfinite(pd.to_numeric(pd.Series([_row.get("learned_vol")]), errors="coerce").iloc[0]):
-        _learned = float(_row["learned_vol"])
-        tut("learned_vol")
-        _use = input(f"A learned volatility exists for this market (vol_index {_learned:.3f}, "
-                     f"saved {str(_row.get('updated'))[:10]}). Use it instead of the market-change formula? (y/n) [y]: ").strip().lower()
-        if _use in ("", "y", "yes"):
-            learned_vol_fixed = _learned
+if not backtest and ARGS.vol_index is not None:
+    learned_vol_fixed = float(ARGS.vol_index)          # already checked against [limits] at start-up
+elif not backtest and use_learned_vol:
+    learned_vol_fixed = stored_learned_vol(backtest_timeframe, backtest_interval)
 
 # ─── Bar generation ───────────────────────────────────────────────────────────
 show_run_details   = run_count < 100
-progress_interval  = max(1, run_count // 100)
 
 
 def generate_daily(
@@ -1029,11 +1402,11 @@ def generate_daily(
 ) -> pd.DataFrame:
     """Simulate one OHLC(V) run over the provided timestamp sequence (engine: backtest_compare.generate_ohlc).
 
-    vol_index is computed once by the caller (market_change_pct -> formula, or the learned value) and
-    passed in. `seed` makes the run reproducible; params carry the tunable shape (wicks, jumps, AR(1),
+    vol_index is computed once by the caller (starting_vol: realized volatility of the window before, the
+    market-change formula, or a fixed / learned value) and passed in. `seed` makes the run reproducible; params carry the tunable shape (wicks, jumps, AR(1),
     streak decay, volume ...).
     """
-    p = (params or base_params).with_(vol_index=float(vol_index))
+    p = (params or base_params).with_(vol_index=guard_vol(vol_index, "generator"))
     rng = np.random.default_rng(ENGINE_SEED if seed is None else seed)
     daily = bc.generate_ohlc(timestamps, starting_price, p, rng, allow_negative, IS_INTRADAY, EMPIRICAL)
     if verbose:
@@ -1041,20 +1414,6 @@ def generate_daily(
         print(daily.head(12).to_string())
     return daily
 
-
-black_background_style = mpf.make_mpf_style(
-    base_mpf_style="charles",
-    figcolor="black",
-    facecolor="black",
-    y_on_right=True,
-    rc={
-        "axes.labelcolor":  "white",
-        "axes.titlecolor":  "white",
-        "text.color":       "white",
-        "xtick.color":      "white",
-        "ytick.color":      "white",
-    },
-)
 
 # Per-run bookkeeping shared by the generation, analysis, self-correction and ML steps.
 run_vols: dict[int, float] = {}
@@ -1064,6 +1423,9 @@ run_windows: dict[int, tuple] = {}
 run_augmented: dict[int, bool] = {}
 run_ensemble_label: dict[int, float] = {}
 run_daily: dict[int, pd.DataFrame] = {}
+# Source charts (image_N.png) waiting to be drawn together, on several cores, right after the run loop.
+# None = draw each chart as soon as its run exists (short runs, and runs re-generated after the loop).
+source_chart_queue: list[tuple] | None = None
 
 
 def write_run_outputs(run_number: int, daily: pd.DataFrame, verbose: bool) -> None:
@@ -1071,59 +1433,27 @@ def write_run_outputs(run_number: int, daily: pd.DataFrame, verbose: bool) -> No
     csv_file   = os.path.join(results_dir, f"data_{run_number}.csv")
     image_file = os.path.join(results_dir, f"image_{run_number}.png")
 
-    lowest_low    = daily["Low"].min()
-    open_01       = daily["Open"].iloc[0]
-    close_01      = daily["Close"].iloc[-1]
-    highest_high  = daily["High"].max()
-
-    if lowest_low <= 0:
-        low_to_high_label = "Low to high: N/A"
-    else:
-        percent_change    = abs((highest_high - lowest_low) / lowest_low * 100)
-        low_to_high_label = f"Low to high: {percent_change:.2f}%"
-    market_change = (close_01 - open_01) / open_01 * 100
-
     if render_source_charts:
-        figure, axes = mpf.plot(
-            daily,
-            type="candle",
-            style=black_background_style,
-            volume="Volume" in daily.columns,
-            figsize=(12, 6),
-            ylabel="Price",
-            title=f"{ticker_name} — {backtest_timeframe.upper()} simulation ({interval_label(backtest_interval)} candles)",
-            returnfig=True,
-        )
-        axes[0].legend(
-            handles=[
-                Line2D([], [], linestyle="None", color="none"),
-                Line2D([], [], linestyle="None", color="none"),
-            ],
-            labels=[
-                low_to_high_label,
-                f"Period change: {market_change:.2f}%",
-            ],
-            loc="upper left",
-            handlelength=0,
-            handletextpad=0,
-        )
-        figure.savefig(image_file, facecolor=figure.get_facecolor())
-        plt.close(figure)
+        job = (daily, image_file,
+               f"{ticker_name} — {backtest_timeframe.upper()} simulation ({interval_label(backtest_interval)} candles)")
+        if source_chart_queue is not None:
+            source_chart_queue.append(job)
+        else:
+            chart_jobs.draw_source_chart(job)
 
-    daily.to_csv(csv_file)
-
-    # Validate generated CSV row count matches timeframe expectation. ytd is date-dependent, so its
-    # expected row count is the number of timestamps generated.
+    # Validate the row count against the timeframe before writing. ytd is date-dependent, so its expected
+    # row count is the number of timestamps generated. (Checked on the table in memory: reading every CSV
+    # back cost a full parse per run and told nothing more, since to_csv writes one line per row.)
     expected = len(run_timestamps[run_number]) if backtest_timeframe == "ytd" else bars_for(backtest_timeframe, backtest_interval, today)
-    df_check = pd.read_csv(csv_file, parse_dates=[0])
-    if len(df_check) != expected:
+    if len(daily) != expected:
         raise RuntimeError(
-            f"Generated CSV rows ({len(df_check)}) != expected for timeframe '{backtest_timeframe}' at {backtest_interval} candles ({expected}) - file: {csv_file}"
+            f"Generated rows ({len(daily)}) != expected for timeframe '{backtest_timeframe}' at {backtest_interval} candles ({expected}) - file: {csv_file}"
         )
+    daily.to_csv(csv_file)
 
     if verbose:
         if render_source_charts:
-            print(f"\nSaved chart to : {image_file}")
+            print(f"\n{'Chart (after the runs)' if source_chart_queue is not None else 'Saved chart to'} : {image_file}")
         print(f"Saved data to  : {csv_file}")
 
 
@@ -1139,6 +1469,18 @@ def make_run(run_number: int, vol: float, params: "bc.GenParams", seed: int, ver
 daily = pd.DataFrame()
 backtest_cycles: list[dict] = []
 aug_base: dict[int, int] = {}
+FORWARD_VOL: tuple[float, str] | None = None
+if not backtest:
+    # Every forward run starts from the same volatility: work it out (and say so) BEFORE the progress bar
+    # starts, so nothing prints onto the bar's line.
+    if learned_vol_fixed is not None:
+        FORWARD_VOL = guard_vol(learned_vol_fixed, "fixed vol_index"), "fixed / learned vol_index"
+    else:
+        FORWARD_VOL = starting_vol(1, today, None)          # the latest real window, same candle size
+    print(f"  Starting vol_index {FORWARD_VOL[0]:.4g}  <- {FORWARD_VOL[1]}")
+if render_source_charts and run_count >= CFG["performance"]["parallel_min_charts"]:
+    source_chart_queue = []                                  # drawn together after the loop (several cores)
+run_progress = None if show_run_details else ui.Progress(run_count, "generating runs")
 for run_number in range(1, run_count + 1):
 
     # Determine simulation window for this run
@@ -1153,23 +1495,22 @@ for run_number in range(1, run_count + 1):
     if show_run_details:
         verb = "backtest cycle" if backtest else "run"
         print(f"\nGenerating {verb} {run_number} of {run_count}{cycle_label}...")
-    elif (
-        run_number == 1
-        or run_number % progress_interval == 0
-        or run_number == run_count
-    ):
-        print(f"Generating run {run_number:,} of {run_count:,}{cycle_label}...")
+    else:
+        run_progress.update(run_number, cycle_label.strip())
 
     timestamps = build_timestamps(backtest_timeframe, sim_start, sim_end, backtest_interval)
     run_timestamps[run_number], run_windows[run_number] = pd.DatetimeIndex(timestamps), (sim_start, sim_end)
     # Compute vol_index once per run and pass it to the generator to avoid
     # repeated calls and to make behavior deterministic for the whole run.
-    market_change_pct, change_info = run_market_change(backtest_timeframe, sim_start, sim_end)
-    if show_run_details and backtest:
-        print(f"  Market change: {describe_change(backtest_timeframe, market_change_pct, change_info)}")
-    run_vol_index = vol_from_market_change(market_change_pct)
-    if learned_vol_fixed is not None:
-        run_vol_index = learned_vol_fixed
+    if FORWARD_VOL is not None:
+        run_vol_index, vol_note = FORWARD_VOL
+    elif learned_vol_fixed is not None:
+        run_vol_index, vol_note = guard_vol(learned_vol_fixed, "fixed vol_index"), "fixed / learned vol_index"
+    else:
+        # cycle x (1 = newest) starts from the real volatility of window x + 1: the one just before it
+        run_vol_index, vol_note = starting_vol(run_count - run_number + 2, sim_start, sim_end)
+    if backtest and show_run_details:
+        print(f"  Starting vol_index {run_vol_index:.4g}  <- {vol_note}")
     daily = make_run(run_number, run_vol_index, base_params, bc.cycle_seed(ENGINE_SEED, run_number, 0),
                      verbose=show_run_details)
     if backtest:
@@ -1177,8 +1518,23 @@ for run_number in range(1, run_count + 1):
             {"cycle": run_number, "sim": daily.copy(), "start": sim_start, "end": sim_end, "vol_index": run_vol_index}
         )
 
+if source_chart_queue:
+    _workers = chart_jobs.worker_count(len(source_chart_queue), CFG["performance"]["chart_workers"],
+                                       CFG["performance"]["parallel_min_charts"])
+    _bar = ui.Progress(len(source_chart_queue), f"source charts ({_workers} process{'es' if _workers > 1 else ''})")
+    chart_jobs.run(chart_jobs.draw_source_chart, source_chart_queue, _workers, _bar.update)
+source_chart_queue = None                                    # runs re-generated later draw their chart at once
+
 # ─── Analysis ─────────────────────────────────────────────────────────────────
 OHLC = ["Open", "High", "Low", "Close"]
+# config.toml [ml] keep_history: "ask" keeps the question inside ml_model, "yes" / "no" answer it for you.
+KEEP_HISTORY = keep_history_answer            # asked with the other questions, before the run
+ML_DIR: Path | None = None
+
+
+def ml_folder() -> Path:
+    from ml_model import _asset_output_name
+    return Path(analysis_dir) / "ml_results" / _asset_output_name(asset_type, ticker_name) / backtest_timeframe.lower()
 
 
 def run_analysis() -> dict:
@@ -1191,6 +1547,8 @@ def run_analysis() -> dict:
         timeframe=backtest_timeframe,
         chart_label=f"{chart_symbol} ({interval_label(backtest_interval)})",
         vol_by_run=dict(run_vols),
+        performance=CFG["performance"],
+        progress=ui.Progress,
     )
     summary_path = Path(analysis_dir) / "analysis_summary.csv"
     table = pd.read_csv(summary_path)
@@ -1229,7 +1587,8 @@ def realised_vol_step(allow_fix: bool) -> None:
     if len(flagged) and allow_fix:
         for _, row in flagged.iterrows():
             run = int(row["run"])
-            new_vol = float(np.clip(row["suggested_vol_index"], run_vols[run] * 0.25, run_vols[run] * 4.0))
+            new_vol = guard_vol(float(np.clip(row["suggested_vol_index"], run_vols[run] * 0.25, run_vols[run] * 4.0)),
+                                "realised-vol correction")
             daily_fixed = make_run(run, new_vol, run_params[run], bc.cycle_seed(ENGINE_SEED, run, 2),
                                    augmented=run_augmented.get(run, False))
             if backtest and run <= run_count:
@@ -1315,6 +1674,7 @@ if backtest:
         today      = today,
         bar        = bar_spec,
         interval   = backtest_interval,
+        prefetched = {r: real_window(run_count - r + 1) for r in range(1, run_count + 1)},   # no second download
     )
     merge_scores(bt["items"])
     final_items = bt["items"]
@@ -1397,7 +1757,10 @@ if backtest:
 
             print("\n══ Self-correction summary ══════════════════════════════════════")
             print(sc["line"])
-            print(f"  accuracy index    baseline {bt['overall_index']:+.3f}  ->  self-corrected {bt2['overall_index']:+.3f}")
+            print(f"  accuracy index    baseline {bt['overall_index']:+.3f}  ->  self-corrected {bt2['overall_index']:+.3f}"
+                  f"   (chance {bt2['chance']['accuracy_index']:+.3f})")
+            print(f"  real_indicator    baseline {bt['real_indicator']:+.3f}  ->  self-corrected {bt2['real_indicator']:+.3f}"
+                  f"   (chance {bt2['chance']['real_indicator']:+.3f})")
             print(f"  direction match   baseline {100 * bt['overall_direction_match_pct']:.1f}%  ->  "
                   f"self-corrected {100 * bt2['overall_direction_match_pct']:.1f}%   (50% = coin flip)")
             print(f"  composite F       null {sc['null']['F']:+.3f}  ->  {sc['final']['F']:+.3f} (global vol, fresh seeds)   "
@@ -1417,67 +1780,36 @@ if backtest:
                       "        out-of-sample line.")
             print("═════════════════════════════════════════════════════════════════")
 
-    # ML on the backtest cycles (uses vol_index, accuracy_index, direction match from this run)
-    if run_count >= 10:
-        ml_choice = ask("\nRun ML model on these backtest cycles? (y/n): ", "ml").strip().lower()
-        if ml_choice in ("y", "yes"):
-            from ml_model import run_ml_pipeline
-            try:
-                run_ml_pipeline(analysis_dir, instrument=ticker_name, asset_type=asset_type, timeframe=backtest_timeframe,
-                                validation=build_validation(final_items or bt["items"]), config=CFG)
-            except (ValueError, FileNotFoundError) as ml_error:
-                print(f"[ML] Skipped: {ml_error}")
+    # ML on the backtest cycles (asked with the other questions; uses vol_index, accuracy_index, direction match)
+    if run_ml:
+        from ml_model import run_ml_pipeline
+        try:
+            run_ml_pipeline(analysis_dir, keep_history=KEEP_HISTORY, instrument=ticker_name, asset_type=asset_type,
+                            timeframe=backtest_timeframe, validation=build_validation(final_items or bt["items"]),
+                            config=CFG)
+            ML_DIR = ml_folder()
+        except (ValueError, FileNotFoundError) as ml_error:
+            print(f"[ML] Skipped: {ml_error}")
 
 if not backtest:
 # ─── ML option ────────────────────────────────────────────────────────────────
-    if run_count < 100:
-        ml_choice = ask("\nRun ML model on these results? (y/n): ", "ml").strip().lower()
-        run_ml    = ml_choice in ("y", "yes")
-
-    if run_ml:
+    if run_ml:                                     # asked with the other questions, before the run
         from ml_model import run_ml_pipeline
         try:
             run_ml_pipeline(
                 analysis_dir,
-                instrument  = ticker_name,
-                asset_type  = asset_type,
-                timeframe   = backtest_timeframe,
-                config      = CFG,
+                keep_history = KEEP_HISTORY,
+                instrument   = ticker_name,
+                asset_type   = asset_type,
+                timeframe    = backtest_timeframe,
+                config       = CFG,
             )
+            ML_DIR = ml_folder()
         except (ValueError, FileNotFoundError) as ml_error:
             print(f"[ML] Skipped: {ml_error}")
 
     bump_recal_counter(run_count)
     df = daily
 
-# ─── Report, archive ──────────────────────────────────────────────────────────
-try:
-    from ml_model import write_html_report
-    print(f"\nHTML report: {write_html_report(analysis_dir)}")
-except Exception as error:
-    print(f"HTML report skipped ({type(error).__name__}: {error})")
-
-
-def archive_results() -> None:
-    """Zip the per-run CSV/PNG files (about 10x smaller than loose files, far faster to sync or commit)."""
-    storage = CFG["storage"]
-    target = Path(storage["archive_dir"]) if storage["archive_dir"] else Path(master_dir)
-    target.mkdir(parents=True, exist_ok=True)
-    safe_name = "".join(ch if ch.isalnum() else "_" for ch in ticker_name)
-    archive_path = target / f"looped_results_{safe_name}_{pd.Timestamp.now():%Y%m%d_%H%M%S}.zip"
-    members = [p for p in Path(results_dir).iterdir()
-               if p.is_file() and (storage["keep_png"] or p.suffix.lower() != ".png")]
-    with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as bundle:
-        for path in members:
-            bundle.write(path, path.name)
-    loose = sum(p.stat().st_size for p in members)
-    print(f"Archived {len(members):,} files ({loose / 1e6:.1f} MB loose) -> {archive_path} "
-          f"({archive_path.stat().st_size / 1e6:.1f} MB)")
-    if storage["delete_loose_after_archive"]:
-        for path in members:
-            path.unlink()
-        print("  loose files removed (set delete_loose_after_archive = false to keep them).")
-
-
-if ARGS.archive or CFG["storage"]["archive_after_run"]:
-    archive_results()
+# ─── Report, archive, outputs ─────────────────────────────────────────────────
+finish_run(ML_DIR)

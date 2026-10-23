@@ -793,7 +793,8 @@ def _add_engineered_features(df: pd.DataFrame) -> pd.DataFrame:
     # RSI: distance from neutral and an overbought-state indicator.
     if require(["rsi14_last"]):
         df["rsi_distance_from_50"] = df["rsi14_last"] - 50.0
-        df["rsi_overbought_flag"] = (df["rsi14_last"] >= 70).astype(float)
+        import market_analysis as _ma          # configured from config.toml [indicators]
+        df["rsi_overbought_flag"] = (df["rsi14_last"] >= _ma.RSI_HIGH).astype(float)
     else:
         df["rsi_distance_from_50"] = np.nan
         df["rsi_overbought_flag"] = np.nan
@@ -981,6 +982,9 @@ def run_ml_pipeline(
     # ── Load and prepare data ─────────────────────────────────────────────────
     cfg = config if config is not None else _config()
     ml_cfg = cfg["ml"]
+    train_frac = float(ml_cfg.get("train_frac", TRAIN_FRAC))      # config.toml [ml]
+    val_frac = float(ml_cfg.get("val_frac", VAL_FRAC))
+    nan_drop_pct = float(ml_cfg.get("nan_drop_pct", NAN_DROP_PCT))
     label_mode = label_mode or ml_cfg["label_mode"]
     tune_rf = ml_cfg["tune_rf"] if tune_rf is None else tune_rf
     online = ml_cfg["online_update"] if online is None else online
@@ -1028,7 +1032,7 @@ def run_ml_pipeline(
         raise ValueError(f"Target column '{TARGET_COL}' not found in {summary_csv.name}.")
 
     # ── Feature validation ────────────────────────────────────────────────────
-    available_features = _select_features(df, FEATURES, TRAIN_FRAC)
+    available_features = _select_features(df, FEATURES, train_frac, nan_drop_pct)
     if not available_features:
         raise ValueError("No usable features remain after NaN filtering.")
 
@@ -1050,8 +1054,7 @@ def run_ml_pipeline(
               + ".\n     Features and label are measured on the SAME finished path, so accuracy above 0.50 is mechanical, "
               "not forecasting.\n     Use label_mode = \"forecast\" (config.toml [ml] or --label forecast): features from the "
               "first 70% of the bars, label from the last 30%.")
-    print(f"[ML][{asset_label}] Label: {label_text}; sample weights "
-          f"{'on (accuracy_index x augmentation boost)' if (weights != 1).any() else 'uniform'}")
+    print(f"[ML][{asset_label}] Label: {label_text}; sample weights {describe_weights(df, weights)}")
 
     # ── Online learning: add trees from the NEW batch to the saved forest (no retrain) ────────
     if online and keep_history and _LAST_BATCH_DUPLICATE:
@@ -1077,8 +1080,8 @@ def run_ml_pipeline(
     # Block (not random) because a single rand.seed() before price_modeling.py's
     # run loop means consecutive runs share one RNG chain; shuffling would allow
     # RNG-correlated information to leak between train and test sets.
-    train_end = int(n_runs * TRAIN_FRAC)
-    val_end   = int(n_runs * (TRAIN_FRAC + VAL_FRAC))
+    train_end = int(n_runs * train_frac)
+    val_end   = int(n_runs * (train_frac + val_frac))
 
     X_train, y_train = X.iloc[:train_end].copy(),       y[:train_end]
     X_val,   y_val   = X.iloc[train_end:val_end].copy(), y[train_end:val_end]
@@ -1103,7 +1106,7 @@ def run_ml_pipeline(
     n_train       = len(X_train)
     min_leaf      = max(2, n_train // 100)
     rf_params     = dict(
-        n_estimators    = 500,
+        n_estimators    = int(ml_cfg.get("n_estimators", 500)),
         max_features    = "sqrt",       # sqrt(n_features) per split — Breiman's recommendation
         min_samples_leaf= min_leaf,
         class_weight    = "balanced",   # guard against class imbalance at small N
@@ -1383,11 +1386,11 @@ def run_ml_pipeline(
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 
 def _select_features(
-    df: pd.DataFrame, candidates: list[str], train_frac: float
+    df: pd.DataFrame, candidates: list[str], train_frac: float, nan_drop_pct: float = NAN_DROP_PCT
 ) -> list[str]:
     """
     Return the subset of candidates that are present in df and have fewer than
-    NAN_DROP_PCT NaN values in the training partition.
+    nan_drop_pct NaN values in the training partition (config.toml [ml] nan_drop_pct).
     Prints a warning for every excluded column.
     """
     n_train = int(len(df) * train_frac)
@@ -1397,7 +1400,7 @@ def _select_features(
             print(f"[ML] Skipped (missing)  : {col}")
             continue
         nan_frac = df[col].iloc[:n_train].isna().mean()
-        if nan_frac >= NAN_DROP_PCT:
+        if nan_frac >= nan_drop_pct:
             print(
                 f"[ML] Skipped ({nan_frac:.0%} NaN): {col}  "
                 "(likely all-NaN in futures mode — run with floor prices to populate)"
@@ -1525,6 +1528,8 @@ def _config() -> dict:
     try:
         from backtest_compare import load_config
         return load_config()
+    except ValueError as exc:                                  # ConfigError: a value outside its allowed range
+        raise SystemExit(f"[ML] {exc}") from None
     except Exception as exc:                                   # pragma: no cover - defensive
         print(f"[ML] Could not load config.toml ({exc}); using built-in ml defaults.")
         return {"ml": {"label_mode": "return", "cv_folds": 5, "embargo_pct": 0.02, "use_sample_weight": True,
@@ -1551,6 +1556,9 @@ def prune_outlier_runs(df: pd.DataFrame, pruning_cfg: dict) -> tuple[pd.DataFram
 
     % difference = 100 * |x - median| / max(|median|, 1.4826 * MAD): the MAD floor stops columns
     whose median is ~0 from flagging everything. Never prunes below `min_rows_kept` rows.
+    Live-market batches (price_modeling option 3) mix candle sizes from 2 minutes to a quarter, so
+    there the median is taken within each `period`, and rows with data_source == "real" are never
+    pruned: a real window is what the market did, not an outlier of the generator.
     """
     empty = pd.DataFrame(columns=["run", "column", "pct_difference", "value", "median"])
     if not pruning_cfg.get("enabled", False) or len(df) < 5:
@@ -1558,19 +1566,26 @@ def prune_outlier_runs(df: pd.DataFrame, pruning_cfg: dict) -> tuple[pd.DataFram
     limit = float(pruning_cfg["pct_difference"])
     reasons = []
     flagged = pd.Series(False, index=df.index)
+    protected = (df["data_source"].astype(str) == "real") if "data_source" in df.columns \
+        else pd.Series(False, index=df.index)
+    if "period" in df.columns and df["period"].nunique(dropna=True) > 1:
+        groups = [group.index for _, group in df.groupby("period", sort=False)]
+    else:
+        groups = [df.index]
     for column in pruning_cfg.get("columns", []):
         if column not in df.columns:
             continue
-        values = pd.to_numeric(df[column], errors="coerce")
-        median = float(values.median())
-        mad = float((values - median).abs().median()) * 1.4826
-        scale = max(abs(median), mad, 1e-12)
-        pct = 100.0 * (values - median).abs() / scale
-        hits = pct > limit
-        flagged |= hits.fillna(False)
-        for idx in df.index[hits.fillna(False)]:
-            reasons.append({"run": df.at[idx, "run"] if "run" in df.columns else idx, "column": column,
-                            "pct_difference": float(pct[idx]), "value": float(values[idx]), "median": median})
+        for rows in groups:
+            values = pd.to_numeric(df.loc[rows, column], errors="coerce")
+            median = float(values.median())
+            mad = float((values - median).abs().median()) * 1.4826
+            scale = max(abs(median), mad, 1e-12)
+            pct = 100.0 * (values - median).abs() / scale
+            hits = (pct > limit).fillna(False) & ~protected.loc[rows]
+            flagged.loc[rows] |= hits
+            for idx in rows[hits.to_numpy()]:
+                reasons.append({"run": df.at[idx, "run"] if "run" in df.columns else idx, "column": column,
+                                "pct_difference": float(pct[idx]), "value": float(values[idx]), "median": median})
     kept = df[~flagged]
     if len(kept) < int(pruning_cfg.get("min_rows_kept", 10)):
         print(f"[ML] Pruning would leave {len(kept)} rows (< min_rows_kept); pruning skipped.")
@@ -1687,6 +1702,18 @@ def make_target(df: pd.DataFrame, mode: str) -> tuple[np.ndarray, str]:
                 "ensemble majority-vote direction"
         print("[ML] label_mode 'ensemble' needs ensemble_label (ensemble_k > 1); using total_return_pct > 0.")
     return (df[TARGET_COL] > 0).astype(int).to_numpy(), f"{TARGET_COL} > 0"
+
+
+def describe_weights(df: pd.DataFrame, weights: np.ndarray) -> str:
+    """One line on what the sample weights do (real vs simulated rows in live mode)."""
+    if not (weights != 1).any():
+        return "uniform"
+    if "data_source" in df.columns:
+        source = df["data_source"].astype(str).to_numpy()
+        parts = [f"{name} x{weights[source == name].mean():g}" for name in ("real", "simulated") if (source == name).any()]
+        share = float(weights[source == "real"].sum() / weights.sum()) if weights.sum() > 0 else float("nan")
+        return f"on ({', '.join(parts)}; the {int((source == 'real').sum())} real rows carry {share:.0%} of the total weight)"
+    return "on (accuracy_index x augmentation boost)"
 
 
 def sample_weights(df: pd.DataFrame, enabled: bool) -> np.ndarray:
@@ -2415,7 +2442,9 @@ def write_html_report(analysis_dir: str | Path, ml_dir: str | Path | None = None
                         ("Volatility equilibrium (learned)", "vol_equilibrium.csv"),
                         ("Regime volatility multipliers", "regime_vol_multipliers.csv"),
                         ("Weak direction-match segments", "weak_segments.csv"),
-                        ("Intraday variance profile", "intraday_variance_profile.csv")):
+                        ("Intraday variance profile", "intraday_variance_profile.csv"),
+                        ("Live market snapshot (current price)", "live_snapshot.csv"),
+                        ("Live market windows (real candles per period)", "live_windows.csv")):
         frame = _read_csv_safe(analysis_dir / name)
         if len(frame):
             sections.append((title, _html_table(frame)))
@@ -2423,7 +2452,8 @@ def write_html_report(analysis_dir: str | Path, ml_dir: str | Path | None = None
         sections.append(("Convergence certificate", "<pre>" + html.escape(json.dumps(
             {k: v for k, v in cert.items() if k not in ("per_cycle_vol", "cycle_seeds", "params")}, indent=2, default=str)) + "</pre>"))
     for caption, name in (("Backtest: simulated vs real (before = null)", "backtest_plot_null.png"),
-                          ("Backtest: simulated vs real (self-corrected)", "backtest_plot.png")):
+                          ("Backtest: simulated vs real (self-corrected)", "backtest_plot.png"),
+                          ("Live market: real windows and simulated futures", "live_overview.png")):
         image = _embed_png(analysis_dir / name)
         if image:
             sections.append((caption, image))
