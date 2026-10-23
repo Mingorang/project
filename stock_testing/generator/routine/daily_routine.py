@@ -43,6 +43,7 @@ LOG = HERE / "routine_log.csv"
 MAX_AUDIT_ROWS = 20_000          # keep the audit fast on the 100k-row histories
 CONTEXT = {"S&P500": "^GSPC", "VIX": "^VIX", "DXY": "DX-Y.NYB"}
 TRACKED_INPUTS = ["config.toml", "rf_tuning.toml", "ideas.txt", "prompt_ideas.txt"]
+RETAIN_DATED_REPORTS = 14        # dated copies kept on disk; latest.html/.md are never pruned
 
 
 # ─── 1. inputs ────────────────────────────────────────────────────────────────
@@ -300,6 +301,12 @@ body{{background:#0b0e14;color:#e6edf3;font:15px/1.55 system-ui,Segoe UI,sans-se
 <p class="dim">Storage: {html.escape(_storage())}</p></div></body></html>"""
     (OUT / "latest.html").write_text(page, encoding="utf-8")
     (OUT / f"{today}.html").write_text(page, encoding="utf-8")
+    # Retention: one dated page per day grows without bound (365 files a year). Keep the most
+    # recent RETAIN_DATED_REPORTS and drop the rest. latest.html/.md and scan.html are never
+    # touched, and the real history lives in routine_log.csv / scan_history.csv, not here.
+    dated = sorted(OUT.glob("20??-??-??.html"))
+    for stale in dated[:-RETAIN_DATED_REPORTS]:
+        stale.unlink(missing_ok=True)
 
     md = [f"# ML Morning Routine - {today}", f"Market data as of {asof}{' (offline)' if offline else ''}.", "",
           f"- Worst data corruption: {worst_bad:.0f}% of rows have a price <= 0",
