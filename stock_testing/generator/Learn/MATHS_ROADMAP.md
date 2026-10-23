@@ -84,11 +84,11 @@ rule holds here too: if you cannot point at the code that proves it, you have no
 **Learn.** Almost nothing new: re-derive what you know in the language of the video. The one new piece is the PMCC
 formula in the last bullet.
 
-- Lagrange's identity, $|a \times b|^2 + (a\cdot b)^2 = |a|^2|b|^2$, from FP1 results.
+- Lagrange's identity, $|a \times b|^2 + (a\cdot b)^2 = |a|^2|b|^2$, from FP1 results; then its $n$-dimensional form
+  by expanding both sides (geometry notes, Exercise 1).
 - The scalar triple product as $\det[a\;b\;c]$, and why swapping two vectors changes its sign (orientation).
 - The PMCC as the cosine of the angle between two *centred* data vectors. A-level Maths gave you $r$ from the
-  calculator, and 9MA0 does not require the formula, so this definition is the one new piece of Stage 0. It is
-  $S_{xy}/\sqrt{S_{xx}S_{yy}}$ written with vectors:
+  calculator (9MA0 does not require the formula). It is $S_{xy}/\sqrt{S_{xx}S_{yy}}$ written with vectors:
   $r = \dfrac{(x-\bar x)\cdot(y-\bar y)}{|x-\bar x|\,|y-\bar y|}$.
 
 **Project exercise.** Take **three** consecutive daily returns for two sectors: two vectors in $\mathbb{R}^3$. Compute the
@@ -126,7 +126,7 @@ their link to the cross product; the geometric product $ab = a\cdot b + a\wedge 
 
 **Resources.**
 
-- Mathoma, *Geometric Algebra* series (linked in the video's description).
+- Mathoma, *Geometric Algebra* series (the one the video recommends).
 - sudgylacmoe, *A Swift Introduction to Geometric Algebra* (YouTube).
 - Alan Macdonald, *Linear and Geometric Algebra*: undergraduate level, written for exactly this step.
 - Dorst, Fontijne and Mann, *Geometric Algebra for Computer Science*: deeper, if you enjoy it.
@@ -135,7 +135,8 @@ their link to the cross product; the geometric product $ab = a\cdot b + a\wedge 
 squares of the four 3×3 minors of $[a\;b\;c]$ (the Cauchy–Binet formula) and check it against $\det G$. This is the wedge
 product computed *without* a Gram matrix: it shows the two definitions agree.
 
-**Done when** you can explain why the cross product exists only in 3D but the wedge product works in $\mathbb{R}^{60}$.
+**Done when** you can explain why the cross product, read as the normal to a plane, works only in 3D while the wedge
+product works in $\mathbb{R}^{60}$.
 
 ### Stage 3 · Multivariate statistics · 6–8 weeks · February to April 2027 (Phase 2)
 

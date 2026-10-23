@@ -7,8 +7,9 @@ Written 22 October 2026.*
 > **Source note.** These notes were checked against the video's auto-generated English captions (read 22 October 2026)
 > and the essay the video is based on (read in full). Each chapter opens with **What the video says**. Everything after
 > that is marked as coming from the essay or from these notes (background, or **measured**), because much of it goes
-> beyond the video. Every number marked **measured** comes from running the code in Section 4 on Yahoo Finance data up
-> to the final 22 October 2026 close (raw figures: `img/sector_wedge_volume_facts.json`). You have watched the video
+> beyond the video. Every number marked **measured** comes from `scripts/sector_wedge_volume.py`, which runs the
+> Section 4 measurements on Yahoo Finance data up to the final 22 October 2026 close (raw figures:
+> `img/sector_wedge_volume_facts.json`). You have watched the video
 > twice: if a chapter says something different from what you remember, note it in the margin.
 
 ---
@@ -69,7 +70,8 @@ $(X_{t_1+h}, \dots, X_{t_k+h})$ for every shift $h$. Nothing about the process d
 $$\mathbb{E}[X_t] = \mu, \qquad \operatorname{Var}(X_t) = \sigma^2 < \infty, \qquad \operatorname{Cov}(X_t, X_{t+h}) = \gamma(h).$$
 
 Weak stationarity constrains only the first two moments, so skew and kurtosis may still drift. The video's definition
-(all moments) is the strict one.
+(every moment constant) is closer to the strict one, which also requires the way days depend on each other to stay the
+same.
 
 **Why prices are not stationary.** A random walk $P_t = P_{t-1} + \varepsilon_t$ has $\operatorname{Var}(P_t) = t\sigma^2$,
 which grows with time (a *unit root*). Log returns $r_t = \ln(P_t / P_{t-1})$ remove most of that, but not all:
@@ -276,7 +278,7 @@ $$ab = a \cdot b + a \wedge b.$$
 
 For unit vectors in the $e_1e_2$-plane, with $\theta$ the *signed* angle from $a$ to $b$,
 $ab = \cos\theta + \sin\theta\, e_{12}$, and $e_{12}e_{12} = -1$. So $e_{12}$ behaves exactly
-like $i$, and $ab$ is the $e^{i\theta}$ of your complex-numbers work. Mathoma's series (linked in the video description)
+like $i$, and $ab$ is the $e^{i\theta}$ of your complex-numbers work. Mathoma's series (the one the video recommends)
 develops this into rotors.
 
 **Size of a blade: the Gram determinant.** For any vectors $a_1, \dots, a_k$ in $\mathbb{R}^n$ (with $k \le n$), put
@@ -284,16 +286,22 @@ them as the columns of $A$ and let $G = A^\top A$, so $G_{ij} = a_i \cdot a_j$. 
 
 $$\|a_1 \wedge \cdots \wedge a_k\|^2 = \det G.$$
 
-For $k = 2$ this is **Lagrange's identity**, and you can prove it with A-level trigonometry:
+For $k = 2$ this is **Lagrange's identity**. The angle form needs only Core Pure trigonometry:
 
 $$\det\begin{pmatrix} a\cdot a & a\cdot b \\ a\cdot b & b\cdot b\end{pmatrix} = |a|^2|b|^2 - (a\cdot b)^2
-= |a|^2|b|^2(1 - \cos^2\theta) = |a|^2|b|^2\sin^2\theta = \|a \wedge b\|^2.$$
+= |a|^2|b|^2(1 - \cos^2\theta) = |a|^2|b|^2\sin^2\theta,$$
 
-In $\mathbb{R}^3$ the last term is $|a \times b|^2$. In any other dimension there is no cross product, but $\|a \wedge b\|$
-is still the area of the parallelogram on $a$ and $b$.
+the squared area of the parallelogram on $a$ and $b$. That chain holds by the definition of $\theta$
+($\cos\theta = a\cdot b / |a||b|$), so it proves little. The identity's content is the coordinate form:
 
-(**Measured**, on two demeaned sector return vectors in $\mathbb{R}^{60}$ from the window ending 22 October, where no
-cross product exists, so this checks the determinant form: both sides equal $5.4143188355\times10^{-5}$.)
+$$|a|^2|b|^2 - (a\cdot b)^2 = \sum_{i<j} (a_i b_j - a_j b_i)^2 = \|a \wedge b\|^2,$$
+
+because the numbers $a_i b_j - a_j b_i$ are exactly the coefficients of $a \wedge b$ on the basis bivectors $e_{ij}$.
+In $\mathbb{R}^3$ there are three of them, the components of $a \times b$, so the sum is $|a \times b|^2$ (Exercise 1).
+In $\mathbb{R}^n$ there are $n(n-1)/2$ of them and no cross product, and the identity still holds.
+
+(**Measured** on the demeaned XLK and XLF return vectors in $\mathbb{R}^{60}$, window ending 22 October: the
+$2 \times 2$ Gram determinant and the sum over all 1,770 pairs $i<j$ are both $5.4143188355\times10^{-5}$.)
 
 ### 1.6 Geometric regime detection (21:18)
 
@@ -457,11 +465,13 @@ causes fewer transaction-cost problems. The essay's bigger performance numbers a
 
 Each is proved from things you have done, then confirmed numerically (Section 4 code, the window ending 22 October).
 
-**I1. Lagrange's identity** (2 vectors): $\det G = |a|^2|b|^2 - (a\cdot b)^2 = |a|^2|b|^2\sin^2\theta$. *Proof:* Section 1.5.
-*Measured:* both sides $5.4143188355\times10^{-5}$.
+**I1. Lagrange's identity** (2 vectors): $\det G = |a|^2|b|^2 - (a\cdot b)^2 = \sum_{i<j}(a_ib_j - a_jb_i)^2 = \|a \wedge b\|^2$.
+*Proof:* expand both sides (Exercise 1); Section 1.5 has the picture. *Measured:* both sides
+$5.4143188355\times10^{-5}$ (1,770 terms on the right).
 
 **I2. The Gram determinant is the squared volume:** $\|a_1\wedge\cdots\wedge a_k\|^2 = \det(A^\top A)$.
-*Proof sketch:* Gram–Schmidt writes $A = QR$, with $Q$ having orthonormal columns and $R$ upper-triangular. Then
+*Proof sketch:* Gram–Schmidt writes $A = QR$, with $Q$ having orthonormal columns and $R$ upper-triangular (only in
+this proof is $R$ the triangular factor rather than the correlation matrix). Then
 $A^\top A = R^\top Q^\top Q R = R^\top R$, so $\det(A^\top A) = (\det R)^2 = \prod r_{ii}^2$. Each $r_{ii}$ is the distance
 from $a_i$ to the span of the previous vectors, its "height". The product of base × heights is the volume, exactly as
 for a parallelogram (base × height) and a parallelepiped (base area × height).
@@ -493,7 +503,7 @@ regression and PCA, which you will meet separately at QMUL.
 | 3 | Backtest data checks | A zero-volume test across cycle return vectors | Today's 1d bug (each weekend gave three copies of Friday) produces *identical* vectors, so the wedge is exactly 0. A duplicate-window detector for free |
 | 4 | ML features, Phase 2 ("feature factory") | Rolling sector log-volume, its 20-day change, its percentile; an instrument's $1/\sqrt{\mathrm{VIF}}$ against the sectors | Market-state features that are point-in-time by construction (the window ends at $t-1$) |
 | 5 | ML redundancy, Phase 2 week 20 ("Multicollinearity") | The volume of the 30 standardised ML features, and each feature's leave-one-out ratio | One number for how redundant the indicator set is, and I5 says exactly which features add nothing |
-| 6 | Portfolio risk, Phase 4 (manual VI.7) | Effective number of bets; 2-blade areas between instruments | **Measured:** GBP/USD and EUR/USD, 6-month $\rho = 0.844$, area $\sqrt{1-\rho^2} = 0.54$. Two positions span about half the "area" of two independent bets |
+| 6 | Portfolio risk, Phase 4 (manual VI.7) | Effective number of bets; 2-blade areas between instruments | **Measured:** GBP/USD and EUR/USD, 6-month $\rho = 0.845$, area $\sqrt{1-\rho^2} = 0.54$. Two positions span about half the "area" of two independent bets |
 | 7 | Simulator realism | A multi-asset generator (Cholesky, manual VI.7) validated by its Gram-volume distribution | Independent simulated paths give about 0.73; real sectors give a median of 0.013. A geometric version of adversarial validation |
 
 The first three are small and safe. Number 5 is the most valuable for the ML: it turns "the indicators are collinear"
@@ -576,7 +586,8 @@ FUNCTION decompose(R, names):                               ▷ R = correlation 
     ▷ chord between unit vectors: ‖u_i − u_j‖ = √(2(1 − ρ_ij)), in [0, 2]
     D[i, j] ← √(½ · (1 − R[i, j]))                            ▷ AFML's distance: half the chord, in [0, 1]
     clusters ← hierarchical_clustering(D, method = "single")  ▷ which sectors travel together; hierarchical
-                                                              ▷ risk parity (AFML ch. 16) uses this D, single linkage
+                                                              ▷ risk parity (AFML ch. 16) starts from this D, then
+                                                              ▷ clusters on the distance between its columns
     RETURN market_mode_share, effective_bets, contribution, clusters
 
 FUNCTION subspace_angle(r_window, group_a, group_b):        ▷ r_window = the 60-day window of 4.3, ending at t−1
@@ -712,7 +723,8 @@ Measured: this box has volume 0.75 today, and 0.048 at its flattest (7 April 202
 
 ## 5. Exercises
 
-1. Using only FP1 results, show that $|a \times b|^2 + (a \cdot b)^2 = |a|^2|b|^2$ for vectors in $\mathbb{R}^3$.
+1. Using only FP1 results, show that $|a \times b|^2 + (a \cdot b)^2 = |a|^2|b|^2$ for vectors in $\mathbb{R}^3$. Then
+   prove the $n$-dimensional form, $|a|^2|b|^2 - (a\cdot b)^2 = \sum_{i<j}(a_ib_j - a_jb_i)^2$, by expanding both sides.
 2. Write $a \wedge b$ in components for $a = (1, 2, 0)$, $b = (0, 1, 3)$ and check its three coefficients against
    $a \times b$.
 3. Three return vectors have pairwise correlations 0.9, 0.9 and 0.65. Compute $\det R$ and the volume. Then change
@@ -740,4 +752,4 @@ $2(0.9)^2 - 1 = 0.62$ means they sit at $\pm\theta$ in the *same plane*, so all 
 ---
 
 *Measured on Yahoo Finance data (adjusted closes, 2005 to the final 22 October 2026 close). The chart and every
-"measured" figure are reproducible with the code in Section 4. Nothing here is investment advice.*
+"measured" figure are reproduced by `scripts/sector_wedge_volume.py`. Nothing here is investment advice.*
