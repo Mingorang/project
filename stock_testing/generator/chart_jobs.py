@@ -18,17 +18,15 @@ import warnings
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Iterator, Sequence
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-from matplotlib.lines import Line2D
 
 _STYLE = None
 
 
 def _source_style() -> Any:
+    import matplotlib  # lazy; Agg must be set before mplfinance imports pyplot
+    matplotlib.use("Agg")
     global _STYLE
     if _STYLE is None:
         import mplfinance as mpf
@@ -42,6 +40,10 @@ def _source_style() -> Any:
 
 def draw_source_chart(job: tuple[Any, str, str]) -> None:
     """(daily OHLC(V) frame, image path, title) -> the run's candlestick PNG (image_N.png)."""
+    import matplotlib  # lazy; Agg before mplfinance/pyplot
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
     import mplfinance as mpf
     daily, image_file, title = job
     lowest_low = daily["Low"].min()
@@ -146,3 +148,52 @@ def run(func: Callable[[Any], None], jobs: Sequence[Any], workers: int,
         if on_done:
             on_done(done)
     return 1
+
+
+def csv_piece(job: tuple[Any, bool]) -> str:
+    """(rows of a frame, write the header?) -> that piece of frame.to_csv(index=False) as text."""
+    frame, header = job
+    return frame.to_csv(index=False, header=header)
+
+
+def map_ordered(func: Callable[[Any], Any], jobs: Sequence[Any], workers: int) -> Iterator[Any]:
+    """Yield func(job) for every job IN ORDER, computed in `workers` processes when workers > 1.
+
+    Like run(), the main script is hidden while the workers start, and a pool that cannot start or breaks
+    falls back to computing the remaining jobs here, so the result never depends on the speed-up.
+    """
+    done = 0
+    if workers > 1 and len(jobs) > 1:
+        main = sys.modules.get("__main__")
+        saved_file = main.__dict__.pop("__file__", None) if main is not None else None
+        saved_spec = getattr(main, "__spec__", None) if main is not None else None
+        pool = None
+        try:
+            if main is not None:
+                main.__spec__ = None
+            try:
+                context = multiprocessing.get_context("spawn")
+                pool = ProcessPoolExecutor(max_workers=min(workers, len(jobs)), mp_context=context,
+                                           initializer=_quiet_worker)
+                futures = [pool.submit(func, job) for job in jobs]   # workers start here, main still hidden
+            except (BrokenProcessPool, OSError):
+                futures = []
+        finally:
+            if main is not None:
+                if saved_file is not None:
+                    main.__file__ = saved_file
+                main.__spec__ = saved_spec
+        try:
+            for future in futures:
+                result = future.result()
+                futures[done] = None                                   # free each result once it is used
+                done += 1
+                yield result
+        except (BrokenProcessPool, OSError) as error:
+            print(f"   ! parallel work stopped ({type(error).__name__}); finishing the remaining "
+                  f"{len(jobs) - done} piece(s) in this process")
+        finally:
+            if pool is not None:
+                pool.shutdown(wait=done == len(jobs), cancel_futures=True)
+    for job in jobs[done:]:
+        yield func(job)

@@ -1,17 +1,15 @@
 """Batch-analysis helpers for the looped OHLC CSV/PNG generator."""
 from __future__ import annotations
 
+import io
 import math
+import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-from matplotlib.collections import PolyCollection
 import numpy as np
 import pandas as pd
-from PIL import Image, ImageDraw
 
 # Indicator settings: config.toml [indicators] is the single source (see configure()). The values
 # below are only the import-time defaults; configure() replaces them before any analysis runs.
@@ -29,8 +27,10 @@ Trade = dict[str, Any]
 
 def t_critical(confidence: float, window: int) -> float:
     """Two-sided Student-t critical value for a `confidence` interval on the mean of `window` values."""
-    from scipy import stats
-    return float(stats.t.ppf(1.0 - (1.0 - confidence) / 2.0, window - 1))
+    # scipy.special.stdtrit is the routine stats.t.ppf calls (bit-identical on 3,493 (q, df) pairs); importing it
+    # instead of scipy.stats saves ~1 s, and this runs on every `import market_analysis` (configure at load).
+    from scipy.special import stdtrit
+    return float(stdtrit(window - 1, 1.0 - (1.0 - confidence) / 2.0))
 
 
 SETTINGS: dict[str, Any] = {}   # the [indicators] table last applied (sent to chart worker processes)
@@ -86,7 +86,7 @@ INDICATOR_COLUMNS = (
 )
 
 
-def _indicators_wide(open_: np.ndarray, high: np.ndarray, low: np.ndarray, close: np.ndarray) -> dict[str, np.ndarray]:
+def _indicators_wide_pandas(open_: np.ndarray, high: np.ndarray, low: np.ndarray, close: np.ndarray) -> dict[str, np.ndarray]:
     """Every indicator for k runs of the same length at once: inputs are (bars, k) arrays, one column per run.
 
     pandas runs its rolling / ewm kernels column by column, so column j is bit-for-bit what the one-run
@@ -137,6 +137,132 @@ def _indicators_wide(open_: np.ndarray, high: np.ndarray, low: np.ndarray, close
     out["bar_return_pct"] = np.where(np.isinf(bar_return), np.nan, bar_return)
     return out
 
+
+
+# pandas runs a rolling / ewm kernel once PER COLUMN (one Python round trip per run), which made the indicators
+# ~1.7 ms per run. The kernels themselves take explicit window bounds, so the fast path lays all k runs end to
+# end in one array and calls each kernel once with bounds that never cross a run: the same kernel doing the same
+# additions in the same order for every window, so the same bits. pandas' kernels are private, so the fast path
+# compares itself with the pandas path once per process and is used only if every value matches.
+_KERNELS: Any = None            # None = not checked yet, False = use the pandas path, else the kernel functions
+
+
+def _run_windows(k: int, n: int, window: int) -> tuple[np.ndarray, np.ndarray]:
+    """Rolling-window bounds for k runs of n bars end to end (= pandas' FixedWindowIndexer within each run)."""
+    end = np.arange(1, k * n + 1, dtype=np.int64)
+    return np.maximum(end - window, (np.arange(k * n, dtype=np.int64) // n) * n), end
+
+
+def _indicators_runs(kernels: Any, open_: np.ndarray, high: np.ndarray, low: np.ndarray,
+                     close: np.ndarray) -> dict[str, np.ndarray]:
+    roll_mean, roll_var, ewm, zsqrt = kernels
+    n, k = close.shape
+    c, h, l = (np.ascontiguousarray(np.asarray(a, dtype=np.float64).T) for a in (close, high, low))   # (k, n)
+    run_start = np.arange(k, dtype=np.int64) * n
+    run_end = run_start + n
+    bounds: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+
+    def prep(values: np.ndarray) -> np.ndarray:                 # = BaseWindow._prep_values
+        values = np.ascontiguousarray(values, dtype=np.float64).reshape(-1)
+        infinite = np.isinf(values)
+        return np.where(infinite, np.nan, values) if infinite.any() else values
+
+    def window(w: int) -> tuple[np.ndarray, np.ndarray]:
+        if w not in bounds:
+            bounds[w] = _run_windows(k, n, w)
+        return bounds[w]
+
+    def mean(values: np.ndarray, w: int) -> np.ndarray:        # = .rolling(w, min_periods=w).mean()
+        return roll_mean(prep(values), *window(w), w).reshape(k, n)
+
+    def std(values: np.ndarray, w: int) -> np.ndarray:         # = .rolling(w, min_periods=w).std(ddof=1)
+        return zsqrt(roll_var(prep(values), *window(w), w, ddof=1)).reshape(k, n)
+
+    def ewm_mean(values: np.ndarray, **options: Any) -> np.ndarray:
+        spec = pd.Series([0.0]).ewm(adjust=False, **options)   # pandas' own com / min_periods for these options
+        return ewm(prep(values), run_start, run_end, spec.min_periods, com=spec._com, adjust=spec.adjust,
+                   ignore_na=spec.ignore_na, deltas=None, normalize=True).reshape(k, n)
+
+    out: dict[str, np.ndarray] = {}
+    fast, slow, sd_slow = mean(c, FAST), mean(c, SLOW), std(c, SLOW)
+    margin = T_CRITICAL * sd_slow / math.sqrt(SLOW)
+    out["fast_sma_5"], out["slow_sma_12"] = fast, slow
+    out["ci95_lower_12"], out["ci95_upper_12"] = slow - margin, slow + margin
+    mid, sd_bb = mean(c, BB_WINDOW), std(c, BB_WINDOW)
+    upper, lower = mid + BB_SD * sd_bb, mid - BB_SD * sd_bb
+    band_width = upper - lower
+    out["bb_mid_20"], out["bb_upper_20_2sd"], out["bb_lower_20_2sd"] = mid, upper, lower
+    out["bb_percent_b"] = (c - lower) / np.where(band_width == 0, np.nan, band_width)
+    absolute_mid = np.abs(mid)
+    out["bb_width_pct"] = 100 * band_width / np.where(absolute_mid == 0, np.nan, absolute_mid)
+
+    delta = np.full((k, n), np.nan)
+    delta[:, 1:] = c[:, 1:] - c[:, :-1]                         # = DataFrame.diff()
+    missing = np.isnan(delta)
+    gain = np.where(missing | (delta >= 0), delta, 0.0)         # = .clip(lower=0), NaN kept
+    loss = -np.where(missing | (delta <= 0), delta, 0.0)        # = -.clip(upper=0)
+    average_gain = ewm_mean(gain, alpha=1 / RSI_PERIOD, min_periods=RSI_PERIOD)
+    average_loss = ewm_mean(loss, alpha=1 / RSI_PERIOD, min_periods=RSI_PERIOD)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        relative_strength = average_gain / np.where(average_loss == 0, np.nan, average_loss)
+        rsi = 100 - 100 / (1 + relative_strength)
+    rsi = np.where((average_loss == 0) & (average_gain > 0), 100.0, rsi)
+    out["rsi_14"] = np.where((average_loss == 0) & (average_gain == 0), 50.0, rsi)
+
+    macd = ewm_mean(c, span=MACD_FAST, min_periods=MACD_FAST) - ewm_mean(c, span=MACD_SLOW, min_periods=MACD_SLOW)
+    signal = ewm_mean(macd, span=MACD_SIGNAL, min_periods=MACD_SIGNAL)
+    out["macd_12_26"], out["macd_signal_9"], out["macd_histogram"] = macd, signal, macd - signal
+
+    previous_close = np.full((k, n), np.nan)
+    previous_close[:, 1:] = c[:, :-1]
+    with np.errstate(invalid="ignore"):
+        true_range = np.fmax(np.fmax(h - l, np.abs(h - previous_close)), np.abs(l - previous_close))
+    true_range[:, 0] = h[:, 0] - l[:, 0]
+    out["true_range"] = true_range
+    out["atr_14"] = ewm_mean(true_range, alpha=1 / ATR_PERIOD, min_periods=ATR_PERIOD)
+    out["bar_change"] = c - previous_close
+    with np.errstate(divide="ignore", invalid="ignore"):
+        bar_return = np.where(previous_close > 0, 100 * (c / previous_close - 1), np.nan)
+    out["bar_return_pct"] = np.where(np.isinf(bar_return), np.nan, bar_return)
+    return {name: values.T for name, values in out.items()}     # (bars, k) like the pandas path
+
+
+def _kernels() -> Any:
+    """pandas' window kernels if the end-to-end path matches the pandas path exactly here, else False."""
+    global _KERNELS
+    if _KERNELS is None:
+        _KERNELS = False
+        try:
+            from pandas._libs.window.aggregations import ewm, roll_mean, roll_var
+            from pandas.core.window.common import zsqrt
+            kernels = (roll_mean, roll_var, ewm, zsqrt)
+            rng = np.random.default_rng(12345)
+            for n, k in ((max(SLOW, MACD_SLOW + MACD_SIGNAL) + 7, 5), (SLOW, 3), (1, 2)):
+                close = 100 * np.exp(np.cumsum(rng.normal(0, 0.02, (n, k)), axis=0))
+                close[:, 1] = 50.0                                       # a flat run (zero variance, RSI 50)
+                close[n // 2:, 0] *= 1e-9                                # a collapse to tiny prices
+                wick = np.abs(rng.normal(0, 0.5, (2, n, k)))
+                open_ = np.vstack([close[:1], close[:-1]])
+                high, low = np.maximum(open_, close) + wick[0], np.minimum(open_, close) - wick[1]
+                want = _indicators_wide_pandas(open_, high, low, close)
+                got = _indicators_runs(kernels, open_, high, low, close)
+                for name in INDICATOR_COLUMNS:
+                    a, b = np.asarray(want[name], dtype=float), np.asarray(got[name], dtype=float)
+                    if (a.shape != b.shape or not np.array_equal(a, b, equal_nan=True)
+                            or not np.array_equal(np.signbit(a), np.signbit(b))):
+                        return _KERNELS
+            _KERNELS = kernels
+        except Exception:                                                # internals moved: keep the pandas path
+            _KERNELS = False
+    return _KERNELS
+
+
+def _indicators_wide(open_: np.ndarray, high: np.ndarray, low: np.ndarray, close: np.ndarray) -> dict[str, np.ndarray]:
+    """Every indicator for k runs of the same length at once: inputs are (bars, k) arrays, one column per run."""
+    kernels = _kernels() if close.size else False
+    if kernels:
+        return _indicators_runs(kernels, open_, high, low, close)
+    return _indicators_wide_pandas(open_, high, low, close)
 
 def _ohlc_columns(frame: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     return tuple(frame[name].to_numpy(dtype=float) for name in ("Open", "High", "Low", "Close"))  # type: ignore[return-value]
@@ -194,7 +320,7 @@ def _trade_from_signal(frame: pd.DataFrame | None, signal_index: int, side: str,
             exit_index, exit_price, reason = index, target, "target"
             break
     pnl = exit_price - entry if side == "Long" else entry - exit_price
-    return {
+    trade = {
         "run": run_id, "side": side, "signal_index": signal_index + 1,
         "signal_time": dates.iloc[signal_index] if hasattr(dates, "iloc") else dates[signal_index],
         "entry_index": entry_index + 1,
@@ -205,19 +331,145 @@ def _trade_from_signal(frame: pd.DataFrame | None, signal_index: int, side: str,
         "exit_price": exit_price, "pnl_per_unit": pnl, "r_multiple": pnl / risk,
         "exit_reason": reason,
     }
+    trade.update(slippage_fields(trade["r_multiple"], reason))
+    return trade
+
+
+# ─── Slippage decomposition (add-only columns) ────────────────────────────────
+# A gap exit fills at the bar's open instead of the barrier. target_gap fills ABOVE the target
+# (favourable, positive slippage); stop_gap fills BELOW the stop (unfavourable, negative slippage).
+SLIPPAGE_TRADE_COLUMNS = ["expected_r", "slippage_r", "positive_slippage_r", "negative_slippage_r",
+                          "slippage_flag", "time_exit_flag"]
+SLIPPAGE_SUMMARY_COLUMNS = [
+    "slippage_count", "positive_slippage_count", "negative_slippage_count",
+    "slippage_share", "positive_slippage_share", "negative_slippage_share", "time_exit_share",
+    "total_positive_slippage_r", "total_negative_slippage_r",
+    "mean_positive_slippage_r", "mean_negative_slippage_r",
+    "best_positive_slippage_r", "worst_negative_slippage_r",
+]
+
+
+def slippage_fields(r_multiple: float, reason: str) -> dict[str, float | int]:
+    """Per-trade slippage in R. Barrier exits fill exactly at the barrier, so their slippage is 0 by definition
+    (r_multiple differs from TARGET_R / -1 only by float rounding). time_exit has no barrier: expected_r is
+    NaN and slippage_r is measured against 0, but it is NOT gap slippage, so the positive/negative parts are 0."""
+    expected = TARGET_R if reason in ("target", "target_gap") else -1.0 if reason in ("stop", "stop_gap") else np.nan
+    gap = reason in ("target_gap", "stop_gap")
+    slip = r_multiple - expected if gap else 0.0 if reason in ("target", "stop") else r_multiple - 0.0
+    return {"expected_r": expected, "slippage_r": slip,
+            "positive_slippage_r": max(slip, 0.0) if reason == "target_gap" else 0.0,
+            "negative_slippage_r": min(slip, 0.0) if reason == "stop_gap" else 0.0,
+            "slippage_flag": int(gap), "time_exit_flag": int(reason == "time_exit")}
+
+
+def slippage_summary(trades: list[Trade]) -> dict[str, float | int]:
+    """Per-run slippage aggregates. Shares are NaN for a run without trades; means/extremes NaN without gaps."""
+    n = len(trades)
+    pos = [t["positive_slippage_r"] for t in trades if t["exit_reason"] == "target_gap"]
+    neg = [t["negative_slippage_r"] for t in trades if t["exit_reason"] == "stop_gap"]
+    n_time = sum(t["exit_reason"] == "time_exit" for t in trades)
+    share = (lambda k: k / n) if n else (lambda k: np.nan)
+    return {
+        "slippage_count": len(pos) + len(neg), "positive_slippage_count": len(pos), "negative_slippage_count": len(neg),
+        "slippage_share": share(len(pos) + len(neg)), "positive_slippage_share": share(len(pos)),
+        "negative_slippage_share": share(len(neg)), "time_exit_share": share(n_time),
+        "total_positive_slippage_r": float(sum(pos)), "total_negative_slippage_r": float(sum(neg)),
+        "mean_positive_slippage_r": float(np.mean(pos)) if pos else np.nan,
+        "mean_negative_slippage_r": float(np.mean(neg)) if neg else np.nan,
+        "best_positive_slippage_r": float(max(pos)) if pos else np.nan,
+        "worst_negative_slippage_r": float(min(neg)) if neg else np.nan,
+    }
+
+
+def with_slippage_columns(frame: pd.DataFrame, kind: str = "summary") -> pd.DataFrame:
+    """Backward compatibility for CSVs written before the slippage columns existed: add each missing column as
+    NaN with one warning per column. Never raises and never rewrites the file on disk."""
+    import warnings
+    columns = SLIPPAGE_SUMMARY_COLUMNS if kind == "summary" else SLIPPAGE_TRADE_COLUMNS
+    frame = frame.copy()
+    for column in columns:
+        if column not in frame.columns:
+            warnings.warn(f"legacy {kind} CSV has no '{column}' column; filled with NaN", stacklevel=2)
+            frame[column] = np.nan
+    return frame
+
+
+def _schema_entry(name: str, series: pd.Series) -> dict[str, Any]:
+    """One column of analysis_schema.json: dtype + discrete/continuous rule for the CSV viewer."""
+    identifiers = {"run", "cycle"}
+    timestamps = {"first_timestamp", "last_timestamp", "highest_high_time", "lowest_low_time", "sim_date",
+                  "best_long_entry", "best_long_exit", "best_short_entry", "best_short_exit"}
+    count_like = ("_count", "_flag", "bars", "_candles", "crossovers", "_trades", "observations", "gap_bars",
+                  "is_backtest", "fast_window", "slow_window")
+    if name in identifiers:
+        kind, dtype = "identifier", "int"
+    elif name in timestamps:
+        kind, dtype = "timestamp", "datetime64"
+    elif pd.api.types.is_bool_dtype(series):
+        kind, dtype = "boolean", "bool"
+    elif pd.api.types.is_integer_dtype(series) or (name.endswith(count_like) and pd.api.types.is_numeric_dtype(series)):
+        kind, dtype = "count", "int"
+    elif pd.api.types.is_numeric_dtype(series):
+        kind, dtype = "measurement", "float"
+    else:
+        kind, dtype = "category", "string"
+    unit = ("R" if name.endswith("_r") or "r_multiple" in name or name == "target_r" else
+            "share" if name.endswith("_share") else "%" if "pct" in name else
+            "count" if kind == "count" else "price" if name.endswith(("_points", "_price", "_close", "_open", "_high", "_low"))
+            else "")
+    numeric = pd.to_numeric(series, errors="coerce") if dtype in ("int", "float") else None
+    entry = {"name": name, "dtype": dtype, "unit": unit,
+             "is_discrete": kind in ("identifier", "count", "category", "boolean"),
+             "is_continuous": kind == "measurement", "description": kind,
+             "range": ([float(numeric.min()), float(numeric.max())] if numeric is not None and numeric.notna().any()
+                       else None)}
+    if kind == "identifier":
+        entry["identifier"] = True
+    return entry
+
+
+def write_analysis_schema(summary: pd.DataFrame, path: Path) -> list[dict[str, Any]]:
+    """analysis_schema.json next to analysis_summary.csv: one entry per column, in CSV order."""
+    import json
+    schema = [_schema_entry(str(name), summary[name]) for name in summary.columns]
+    Path(path).write_text(json.dumps({"columns": schema}, indent=1, default=str), encoding="utf-8")
+    return schema
+
+
+def read_analysis_summary(path: Path) -> pd.DataFrame:
+    """Read analysis_summary.csv with the dtypes from analysis_schema.json beside it (when present). A CSV cannot
+    carry the type of an all-empty column (pandas reads it as float), so the schema is the source of truth."""
+    import json
+    path = Path(path)
+    schema_path = path.with_name("analysis_schema.json")
+    if not schema_path.exists():
+        return with_slippage_columns(pd.read_csv(path), "summary")
+    columns = json.loads(schema_path.read_text(encoding="utf-8"))["columns"]
+    strings = {c["name"]: "string" for c in columns if c["dtype"] == "string"}
+    frame = pd.read_csv(path, dtype=strings)
+    for c in columns:
+        column = frame.get(c["name"])
+        if c["dtype"] == "int" and column is not None and column.isna().any():
+            whole = pd.to_numeric(column, errors="coerce")
+            if (whole.dropna() % 1 == 0).all():                       # nullable int instead of silent float;
+                frame[c["name"]] = whole.astype("Int64")              # leave the column alone if it is not whole
+    return with_slippage_columns(frame, "summary")
 
 
 def _trades_from_arrays(difference: np.ndarray, prices: tuple[list[float], ...], dates: Any, run_id: int) -> list[Trade]:
+    # The crossings are found with array operations (was a Python loop over every bar); only the few
+    # signal bars go through the per-trade simulation, in the same order as before.
+    difference = np.asarray(difference, dtype=float)
+    previous, current = difference[:-1], difference[1:]
+    with np.errstate(invalid="ignore"):
+        finite = np.isfinite(previous) & np.isfinite(current)
+        longs = finite & (previous <= 0) & (current > 0)
+        shorts = finite & (previous >= 0) & (current < 0)
     trades = []
-    for index in range(1, len(difference)):
-        previous, current = difference[index - 1], difference[index]
-        if not np.isfinite(previous) or not np.isfinite(current):
-            continue
-        side = "Long" if previous <= 0 < current else "Short" if previous >= 0 > current else None
-        if side:
-            trade = _trade_from_signal(None, index, side, run_id, prices, dates)
-            if trade:
-                trades.append(trade)
+    for index in np.flatnonzero(longs | shorts) + 1:
+        trade = _trade_from_signal(None, int(index), "Long" if longs[index - 1] else "Short", run_id, prices, dates)
+        if trade:
+            trades.append(trade)
     return trades
 
 
@@ -238,7 +490,13 @@ def _stat(values: Any, function) -> float:
 
 def _sd(values: np.ndarray) -> float:
     """Sample standard deviation (ddof=1); NaN below two values (what pandas' .std() returns)."""
-    return float(np.std(values, ddof=1)) if len(values) > 1 else np.nan
+    n = len(values)
+    if n <= 1:
+        return np.nan
+    # np.std(values, ddof=1) step by step (the same pairwise sums, divisions and square root, so the same
+    # bits) without its wrapper, which was most of the cost of the ~6 calls per run.
+    deviations = values - np.add.reduce(values) / n
+    return float(math.sqrt(np.add.reduce(deviations * deviations) / (n - 1)))
 
 
 def _best(trades: list[Trade], side: str) -> Trade | None:
@@ -316,7 +574,9 @@ def _metrics_arrays(o: np.ndarray, h: np.ndarray, l: np.ndarray, c: np.ndarray, 
     lowest_low, highest_high = l.min(), h.max()
 
     def last(name: str) -> float:
-        return _stat(ind[name][-1:], np.mean)
+        # = _stat(ind[name][-1:], np.mean): the mean of one finite value is that value, else NaN
+        value = float(ind[name][-1]) if len(ind[name]) else np.nan
+        return value if math.isfinite(value) else np.nan
 
     result = {
         "run": run_id, "source_csv": f"data_{run_id}.csv", "source_png": source_png,
@@ -361,6 +621,7 @@ def _metrics_arrays(o: np.ndarray, h: np.ndarray, l: np.ndarray, c: np.ndarray, 
     }
     if volume is not None:
         result.update(_volume_metrics_arrays(volume, h, l, c, ind["bar_return_pct"]))
+    result.update(slippage_summary(trades))
     for side, prefix, trade in (("Long", "best_long", best_long), ("Short", "best_short", best_short)):
         for suffix, key in (("entry", "entry_time"), ("exit", "exit_time"), ("entry_price", "entry_price"),
                             ("stop", "stop_price"), ("target_2R", "target_price"), ("exit_price", "exit_price"),
@@ -400,6 +661,10 @@ def _time_ticks(dates: pd.Series, target: int = 10) -> tuple[np.ndarray, list[st
 
 
 def _draw_chart(frame: pd.DataFrame, run_id: int, best_long: Trade | None, best_short: Trade | None, output: Path, guide_path: Path, instrument: str | None = None, chart_label: str | None = None) -> None:
+    import matplotlib  # lazy: only chart drawing needs matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.collections import PolyCollection
     x = frame["bar"].astype(int).tolist()
     has_volume = "Volume" in frame.columns and pd.to_numeric(frame["Volume"], errors="coerce").notna().all()
     rows = 4 if has_volume else 3
@@ -500,25 +765,41 @@ def _contact_sheet(
     tile_width: int = 310,
     tile_height: int = 185,
     max_tiles: int = 256,
+    threads: int = 1,
 ) -> None:
-    for page_number, start in enumerate(range(0, len(items), max_tiles), start=1):
-        page_items = items[start:start + max_tiles]
-        rows = math.ceil(len(page_items) / columns)
-        sheet = Image.new("RGB", (columns * tile_width, rows * tile_height), "white")
-        draw = ImageDraw.Draw(sheet)
-        for position, (run_id, path) in enumerate(page_items):
-            x, y = (position % columns) * tile_width, (position // columns) * tile_height
-            with Image.open(path) as image:
-                image = image.convert("RGB")
-                image.thumbnail((tile_width - 12, tile_height - 28), Image.Resampling.LANCZOS)
-                sheet.paste(image, (x + (tile_width - image.width) // 2, y + 22))
-            draw.text((x + 6, y + 4), f"Run {run_id}", fill="#111111")
+    from PIL import Image, ImageDraw  # lazy
+    box = (tile_width - 12, tile_height - 28)
 
-        if len(items) > max_tiles:
-            page_output = output.with_name(f"{output.stem}_page_{page_number:03}{output.suffix}")
-        else:
-            page_output = output
-        sheet.save(page_output)
+    def tile(path: Path) -> Any:
+        with Image.open(path) as image:
+            image = image.convert("RGB")
+            image.thumbnail(box, Image.Resampling.LANCZOS)
+            return image
+
+    # Decoding + shrinking each PNG (~0.1 s) was the whole cost and ran on one core. Pillow releases the
+    # GIL while it decodes and resamples, so threads make the tiles in parallel; pasting stays in order,
+    # so the sheets are the same pixels. One page of tiles is held at a time.
+    pool = ThreadPoolExecutor(threads) if threads > 1 and len(items) > 8 else None
+    try:
+        for page_number, start in enumerate(range(0, len(items), max_tiles), start=1):
+            page_items = items[start:start + max_tiles]
+            rows = math.ceil(len(page_items) / columns)
+            sheet = Image.new("RGB", (columns * tile_width, rows * tile_height), "white")
+            draw = ImageDraw.Draw(sheet)
+            tiles = pool.map(tile, [path for _, path in page_items]) if pool else map(tile, (p for _, p in page_items))
+            for position, ((run_id, _), image) in enumerate(zip(page_items, tiles)):
+                x, y = (position % columns) * tile_width, (position // columns) * tile_height
+                sheet.paste(image, (x + (tile_width - image.width) // 2, y + 22))
+                draw.text((x + 6, y + 4), f"Run {run_id}", fill="#111111")
+
+            if len(items) > max_tiles:
+                page_output = output.with_name(f"{output.stem}_page_{page_number:03}{output.suffix}")
+            else:
+                page_output = output
+            sheet.save(page_output)
+    finally:
+        if pool is not None:
+            pool.shutdown(wait=True, cancel_futures=True)
 
 
 def _volume_overall_row(summary: pd.DataFrame) -> tuple[str, Any, str]:
@@ -621,6 +902,199 @@ def _draw_charts(jobs: list[tuple], performance: dict[str, int] | None, progress
     chart_jobs.run(chart_jobs.draw_analysis_chart, jobs, workers, bar.update if bar else None)
 
 
+# ─── Reading many run CSVs fast ───────────────────────────────────────────────
+# With 100,000 small run CSVs the analysis spent most of its time per FILE, not per bar: ~5 ms to open each
+# file on Windows (antivirus scans every open), ~3 ms of read_csv set-up and ~2.5 ms guessing the date format.
+# The fast path opens files on several threads, parses up to READ_BATCH files in one read_csv call and
+# converts their dates in one to_datetime call. It is used only when that provably gives the same frames as
+# reading file by file; anything unusual (other headers, quotes, blank lines, odd dates, a bad candle ...)
+# goes through the original per-file loop, which also raises the original error messages.
+READ_BATCH = 4096
+READ_THREADS = 16
+_ISO_DATE_FORMATS = {"%Y-%m-%d", "%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%dT%H:%M:%S"}
+_EXACT_FLOAT = 2.0 ** 53          # above this an integer written in a CSV may not survive float64 the same way
+
+
+class _Run:
+    """One run's arrays (dates as a datetime array slice). `frame()` rebuilds the run's DataFrame only when it is needed (chart drawing)."""
+    __slots__ = ("run_id", "ohlc", "dates", "volume", "_frame", "_source", "_rows")
+
+    def __init__(self, run_id: int, ohlc: tuple[np.ndarray, ...], dates: list, volume: np.ndarray | None,
+                 frame: pd.DataFrame | None = None, source: pd.DataFrame | None = None, rows: tuple[int, int] = (0, 0)):
+        self.run_id, self.ohlc, self.dates, self.volume = run_id, ohlc, dates, volume
+        self._frame, self._source, self._rows = frame, source, rows
+
+    def frame(self) -> pd.DataFrame:
+        if self._frame is not None:
+            return self._frame
+        start, stop = self._rows
+        return self._source.iloc[start:stop].reset_index(drop=True)
+
+
+def _read_bytes(paths: list[Path]) -> list[bytes]:
+    def read(path: Path) -> bytes:
+        with open(path, "rb") as handle:
+            return handle.read()
+    if len(paths) < 64:
+        return [read(path) for path in paths]
+    with ThreadPoolExecutor(READ_THREADS) as pool:     # opening is I/O-bound: threads overlap the waits
+        return list(pool.map(read, paths))
+
+
+def _parse_batch(blobs: list[bytes], expected: dict[str, Any]) -> tuple[pd.DataFrame, list[int]] | None:
+    """One read_csv for many run files with the same header line, or None when that might differ from
+    reading them one by one. expected carries the header and the date shape across batches."""
+    header = expected.setdefault("header", blobs[0][:blobs[0].find(b"\n") + 1])
+    if not header.endswith(b"\n") or b'"' in header:
+        return None
+    ending = b"\r\n" if header.endswith(b"\r\n") else b"\n"
+    bodies, counts = [], []
+    for blob in blobs:
+        if not blob.startswith(header):
+            return None
+        body = blob[len(header):]
+        # Each row must be one line: no quoted fields (they can hold line breaks), no blank lines, no bare \r.
+        if (not body or b'"' in body or body.startswith((b"\n", b"\r")) or b"\n\n" in body or b"\n\r\n" in body
+                or body.count(b"\r") != body.count(b"\r\n")):
+            return None
+        if not body.endswith(b"\n"):
+            body += ending
+        bodies.append(body)
+        counts.append(body.count(b"\n"))
+    try:
+        frame = pd.read_csv(io.BytesIO(header + b"".join(bodies)))
+    except Exception:
+        return None
+    if len(frame) != sum(counts):
+        return None
+    frame.columns = frame.columns.astype(str).str.strip()
+    if not {"Date", "Open", "High", "Low", "Close"}.issubset(frame.columns) or frame.columns.duplicated().any():
+        return None
+    for name in frame.columns:
+        if name == "Date":
+            continue
+        column = frame[name]
+        # Only plain numbers: per-file int columns then concatenate to the same float64 / int64 values.
+        if column.dtype not in (np.float64, np.int64):
+            return None
+        values = column.to_numpy(dtype=float)
+        if (np.abs(values[np.isfinite(values)]) >= _EXACT_FLOAT).any():
+            return None
+    dates = frame["Date"]
+    if not pd.api.types.is_string_dtype(dates) or dates.isna().any():
+        return None
+    # pandas guesses one date format per to_datetime call from the first value. Batching is the same as per
+    # file when every file's first date has the same shape and that shape is an unambiguous ISO year-month-day.
+    starts = np.cumsum([0] + counts[:-1])
+    shapes = dates.iloc[starts].str.replace(r"\d", "0", regex=True).unique()
+    if len(shapes) != 1 or expected.setdefault("shape", shapes[0]) != shapes[0]:
+        return None
+    if "format" not in expected:
+        from pandas.tseries.api import guess_datetime_format
+        expected["format"] = guess_datetime_format(str(dates.iloc[0]))
+    if expected["format"] not in _ISO_DATE_FORMATS:
+        return None
+    try:
+        frame["Date"] = pd.to_datetime(dates)
+    except Exception:
+        return None
+    if frame["Date"].isna().any():
+        return None
+    return frame, counts
+
+
+def _fast_read(paths: list[Path], run_ids: list[int]) -> tuple[list[_Run], pd.DataFrame] | None:
+    """Every run as a _Run plus all rows stacked in run order (= processed_bars before the indicator
+    columns), or None when the per-file loop must be used."""
+    expected: dict[str, Any] = {}
+    frames, counts = [], []
+    for start in range(0, len(paths), READ_BATCH):
+        parsed = _parse_batch(_read_bytes(paths[start:start + READ_BATCH]), expected)
+        if parsed is None:
+            return None
+        frames.append(parsed[0])
+        counts.extend(parsed[1])
+    frame = frames[0] if len(frames) == 1 else pd.concat(frames, ignore_index=True)
+    bounds = np.cumsum([0] + counts)
+    if min(counts) < SLOW:
+        return None
+    o, h, l, c = _ohlc_columns(frame)
+    if not (np.isfinite(o).all() and np.isfinite(h).all() and np.isfinite(l).all() and np.isfinite(c).all()):
+        return None
+    if ((h < np.maximum(o, c)) | (l > np.minimum(o, c))).any():
+        return None
+    # A run whose dates go backwards is sorted exactly as the per-file loop does it.
+    stamps = frame["Date"].to_numpy()
+    backwards = np.flatnonzero(stamps[1:] < stamps[:-1]) + 1         # row earlier than the row before it
+    backwards = backwards[~np.isin(backwards, bounds)]                 # ... ignoring the first row of each run
+    unsorted = np.unique(np.searchsorted(bounds, backwards, side="right") - 1).tolist()
+    if unsorted:
+        order = np.arange(len(frame))
+        for k in unsorted:
+            piece = frame.iloc[bounds[k]:bounds[k + 1]].reset_index(drop=True)
+            order[bounds[k]:bounds[k + 1]] = bounds[k] + piece.sort_values("Date").index.to_numpy()
+        frame = frame.take(order).reset_index(drop=True)
+        o, h, l, c = _ohlc_columns(frame)
+    dates = frame["Date"].array          # sliced per run; Timestamps are made one run at a time (as before)
+    volume = frame["Volume"].to_numpy(dtype=float) if "Volume" in frame.columns else None
+    runs = [_Run(run_id, (o[a:b], h[a:b], l[a:b], c[a:b]), dates[a:b], None if volume is None else volume[a:b],
+                 source=frame, rows=(a, b))
+            for run_id, a, b in zip(run_ids, bounds[:-1].tolist(), bounds[1:].tolist())]
+    return runs, frame
+
+
+def _read_runs(source: Path, run_ids: list[int]) -> tuple[list[_Run], pd.DataFrame | None]:
+    """Read and check every run CSV. The second value is all rows stacked when the fast path was used."""
+    paths = [source / f"data_{run_id}.csv" for run_id in run_ids]
+    fast = _fast_read(paths, run_ids)
+    if fast is not None:
+        return fast
+    runs = []
+    for run_id, csv_path in zip(run_ids, paths):
+        frame = pd.read_csv(csv_path)
+        frame.columns = frame.columns.astype(str).str.strip()
+        required = {"Date", "Open", "High", "Low", "Close"}
+        if not required.issubset(frame.columns):
+            raise ValueError(f"{csv_path.name} lacks required columns: {sorted(required-set(frame.columns))}")
+        frame["Date"] = pd.to_datetime(frame["Date"])
+        if not frame["Date"].is_monotonic_increasing:
+            frame = frame.sort_values("Date").reset_index(drop=True)
+        o, h, l, c = _ohlc_columns(frame)
+        if not (np.isfinite(o).all() and np.isfinite(h).all() and np.isfinite(l).all() and np.isfinite(c).all()):
+            raise ValueError(f"{csv_path.name} has non-finite OHLC values")
+        if ((h < np.maximum(o, c)) | (l > np.minimum(o, c))).any():
+            raise ValueError(f"{csv_path.name} has invalid OHLC candle ordering")
+        if len(frame) < SLOW:
+            raise ValueError(f"{csv_path.name} has fewer than {SLOW} rows")
+        volume = pd.to_numeric(frame["Volume"], errors="coerce").to_numpy(dtype=float) if "Volume" in frame.columns else None
+        runs.append(_Run(run_id, (o, h, l, c), frame["Date"].array, volume, frame=frame))
+    return runs, None
+
+
+# ─── Writing big CSVs on several cores ────────────────────────────────────────
+PARALLEL_CSV_CELLS = 20_000_000    # below this (rows x columns, ~12,000 runs of bars) one process is as fast
+
+
+def _write_csv(frame: pd.DataFrame, path: Path, workers: int = 1) -> None:
+    """frame.to_csv(path, index=False), byte for byte, with big frames formatted in `workers` processes.
+
+    pandas formats a CSV in chunks of 100,000 // columns rows and decides some formats per chunk (dates
+    without a time of day), so every piece here is a whole number of those chunks: each piece then
+    formats exactly as it would have inside one to_csv call.
+    """
+    cells = len(frame) * max(len(frame.columns), 1)
+    if workers <= 1 or cells < PARALLEL_CSV_CELLS:
+        frame.to_csv(path, index=False)
+        return
+    import chart_jobs
+    chunk = max(1, 100_000 // (len(frame.columns) or 1))         # pandas.io.formats.csvs._DEFAULT_CHUNKSIZE_CELLS
+    rows = chunk * max(1, -(-len(frame) // (workers * 4 * chunk)))
+    jobs = [(frame.iloc[start:start + rows], start == 0) for start in range(0, len(frame), rows)]
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        for text in chart_jobs.map_ordered(chart_jobs.csv_piece, jobs, workers):
+            handle.write(text)
+
+
 def analyze_looped_results(
     source_dir: str | Path,
     output_dir: str | Path,
@@ -669,51 +1143,33 @@ def analyze_looped_results(
     if render_source_charts and (charted - png_ids or png_ids - csv_ids):
         raise ValueError(f"Unmatched files: CSV-only={sorted(charted - png_ids)}, PNG-only={sorted(png_ids - csv_ids)}")
 
-    # 1. Read and check every run.
-    raw: list[tuple[int, pd.DataFrame, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]] = []
-    for run_id in run_ids:
-        csv_path = source / f"data_{run_id}.csv"
-        frame = pd.read_csv(csv_path)
-        frame.columns = frame.columns.astype(str).str.strip()
-        required = {"Date", "Open", "High", "Low", "Close"}
-        if not required.issubset(frame.columns):
-            raise ValueError(f"{csv_path.name} lacks required columns: {sorted(required-set(frame.columns))}")
-        frame["Date"] = pd.to_datetime(frame["Date"])
-        if not frame["Date"].is_monotonic_increasing:
-            frame = frame.sort_values("Date").reset_index(drop=True)
-        o, h, l, c = _ohlc_columns(frame)
-        if not (np.isfinite(o).all() and np.isfinite(h).all() and np.isfinite(l).all() and np.isfinite(c).all()):
-            raise ValueError(f"{csv_path.name} has non-finite OHLC values")
-        if ((h < np.maximum(o, c)) | (l > np.minimum(o, c))).any():
-            raise ValueError(f"{csv_path.name} has invalid OHLC candle ordering")
-        if len(frame) < SLOW:
-            raise ValueError(f"{csv_path.name} has fewer than {SLOW} rows")
-        raw.append((run_id, frame, (o, h, l, c)))
+    # 1. Read and check every run (fast batched path when it is provably the same, else file by file).
+    runs, stacked = _read_runs(source, run_ids)
 
     # 2. Indicators: every run of the same length in one batch (one column per run).
-    indicators: list[dict[str, np.ndarray]] = [{} for _ in raw]
+    indicators: list[dict[str, np.ndarray]] = [{} for _ in runs]
     by_length: dict[int, list[int]] = {}
-    for position, (_, frame, _) in enumerate(raw):
-        by_length.setdefault(len(frame), []).append(position)
+    for position, run in enumerate(runs):
+        by_length.setdefault(len(run.ohlc[3]), []).append(position)
     for positions in by_length.values():
-        wide = _indicators_wide(*(np.column_stack([raw[p][2][k] for p in positions]) for k in range(4)))
+        wide = _indicators_wide(*(np.column_stack([runs[p].ohlc[k] for p in positions]) for k in range(4)))
         per_run = {name: np.ascontiguousarray(values.T) for name, values in wide.items()}   # row j = run j
         for j, p in enumerate(positions):
             indicators[p] = {name: per_run[name][j] for name in INDICATOR_COLUMNS}
 
     # 3. Per run: crossover trades, the summary row, and (optionally) the analysis chart job.
     summaries, all_trades, analysis_images, chart_jobs_ = [], [], [], []
-    for position, (run_id, frame, (o, h, l, c)) in enumerate(raw):
+    for position, run in enumerate(runs):
+        run_id, (o, h, l, c), dates, volume = run.run_id, run.ohlc, run.dates.tolist(), run.volume
         ind = indicators[position]
-        dates = frame["Date"].tolist()
         trades = _trades_from_arrays(ind["fast_sma_5"] - ind["slow_sma_12"], (o.tolist(), h.tolist(), l.tolist(), c.tolist()),
                                      dates, run_id)
         all_trades.extend(trades)
         source_png = f"image_{run_id}.png" if run_id in png_ids else ""
-        volume = pd.to_numeric(frame["Volume"], errors="coerce").to_numpy(dtype=float) if "Volume" in frame.columns else None
         metrics, long_trade, short_trade = _metrics_arrays(o, h, l, c, dates, ind, volume, trades, run_id, source_png)
         summaries.append(metrics)
         if render_charts and run_id in charted:
+            frame = run.frame()
             chart_frame = frame.copy()
             chart_frame["run"] = run_id
             chart_frame["bar"] = np.arange(1, len(frame) + 1)
@@ -730,9 +1186,10 @@ def analyze_looped_results(
 
     summary = pd.DataFrame(summaries).sort_values("run")
     # processed_bars: every run stacked, same columns as one run's frame (CSV columns, run, bar, indicators, direction)
-    bars = pd.concat([frame for _, frame, _ in raw], ignore_index=True)
-    bars["run"] = np.concatenate([np.full(len(frame), run_id) for run_id, frame, _ in raw])
-    bars["bar"] = np.concatenate([np.arange(1, len(frame) + 1) for _, frame, _ in raw])
+    lengths = [len(run.ohlc[3]) for run in runs]
+    bars = stacked if stacked is not None else pd.concat([run.frame() for run in runs], ignore_index=True)
+    bars["run"] = np.concatenate([np.full(n, run.run_id) for run, n in zip(runs, lengths)])
+    bars["bar"] = np.concatenate([np.arange(1, n + 1) for n in lengths])
     for name in INDICATOR_COLUMNS:
         bars[name] = np.concatenate([ind[name] for ind in indicators])
     bars["direction"] = np.where(bars["Close"] >= bars["Open"], "Up", "Down")
@@ -773,20 +1230,25 @@ def analyze_looped_results(
     if vol_by_run:
         # The vol_index each run was generated with (feeds the feature x vol sensitivity map in ml_model).
         summary.insert(1, "vol_index", summary["run"].map(lambda r: vol_by_run.get(int(r), np.nan)))
-    summary.to_csv(output / "analysis_summary.csv", index=False)
-    bars.to_csv(output / "processed_bars.csv", index=False)
-    trade_columns = ["run", "side", "signal_index", "signal_time", "entry_index", "entry_time", "entry_price", "stop_price", "target_price", "risk_per_unit", "exit_index", "exit_time", "exit_price", "pnl_per_unit", "r_multiple", "exit_reason"]
-    pd.DataFrame(all_trades, columns=trade_columns).to_csv(output / "crossover_trades.csv", index=False)
+    import chart_jobs
+    perf = performance or performance_settings()
+    csv_workers = chart_jobs.worker_count(10**9, perf["chart_workers"])
+    _write_csv(summary, output / "analysis_summary.csv", csv_workers)
+    _write_csv(bars, output / "processed_bars.csv", csv_workers)
+    trade_columns = ["run", "side", "signal_index", "signal_time", "entry_index", "entry_time", "entry_price", "stop_price", "target_price", "risk_per_unit", "exit_index", "exit_time", "exit_price", "pnl_per_unit", "r_multiple", "exit_reason"] + SLIPPAGE_TRADE_COLUMNS
+    write_analysis_schema(summary, output / "analysis_schema.json")
+    _write_csv(pd.DataFrame(all_trades, columns=trade_columns), output / "crossover_trades.csv", csv_workers)
     overall = _overall_metrics(summary, bars, all_trades)
     if timeframe is not None:
         overall.insert(0, "timeframe", timeframe)
     overall.to_csv(output / "overall_metrics.csv", index=False)
+    sheet_threads = max(1, min(perf["chart_workers"] or (os.cpu_count() or 2) - 1, os.cpu_count() or 1))
     if render_source_charts:
         sheet = [(run_id, source / f"image_{run_id}.png") for run_id in run_ids if run_id in charted]
         if sheet:
-            _contact_sheet(sheet, output / "all_source_charts_contact_sheet.png")
+            _contact_sheet(sheet, output / "all_source_charts_contact_sheet.png", threads=sheet_threads)
     if render_charts and analysis_images:
-        _contact_sheet(analysis_images, output / "all_analysis_charts_contact_sheet.png")
+        _contact_sheet(analysis_images, output / "all_analysis_charts_contact_sheet.png", threads=sheet_threads)
     return {"runs": len(run_ids), "bars": len(bars), "trades": len(all_trades), "output_dir": str(output)}
 
 
