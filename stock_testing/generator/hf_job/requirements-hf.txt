@@ -1,0 +1,4 @@
+huggingface_hub>=0.34
+datasets>=3.0
+scikit-learn>=1.9
+joblib>=1.4
