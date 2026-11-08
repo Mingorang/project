@@ -1,0 +1,48 @@
+[ML] Historical stock comparison: all runs are outside available historical coverage; intraday yfinance data is limited to recent dates and future candles cannot be matched.
+[ML] History cleared; training on this run only.
+[ML] Pruned 8 outlier run(s) (> 150.0% from the median) -> pruned_runs.csv
+
+[ML][forex EUR/USD] Loaded 1992 rows from analysis_summary.csv
+[ML] Using 32 / 32 candidate features
+[ML] LEAKAGE WARNING (return label): 10 feature(s) separate the label on their own (single-feature AUC >= 0.80): bullish_candle_pct (0.95), candle_direction_balance (0.95), volatility_to_range_ratio (0.90), drawdown_to_volatility (0.90), max_drawdown_pct_positive_prices_only (0.90).
+     Features and label are measured on the SAME finished path, so accuracy above 0.50 is mechanical, not forecasting.
+     Use label_mode = "forecast" (config.toml [ml] or --label forecast): features from the first 70% of the bars, label from the last 30%.
+[ML][forex EUR/USD] Label: total_return_pct > 0; sample weights uniform
+[ML][forex EUR/USD] Split (block):  train=1394  |  val=299  |  test=299
+[ML][forex EUR/USD] Class balance - bullish: 943 / 1992 (47.3%)  (expected about 50% on random data)
+[ML][forex EUR/USD] Training RandomForestClassifier (n_estimators=500, min_samples_leaf=13)...
+[ML][forex EUR/USD] OOB accuracy (train-set estimate): 0.9146
+[ML][forex EUR/USD] Train accuracy : 0.9426
+[ML][forex EUR/USD] Val   accuracy : 0.9064
+[ML][forex EUR/USD] Test  accuracy : 0.9264
+[ML] Note: expected test accuracy about 0.50 on synthetic random data.
+     Compare with real historical data for forex EUR/USD to assess market signal.
+[ML][forex EUR/USD] Accuracy metrics saved -> looped_analysis\ml_results\forex_eur_usd\5y\accuracy_metrics.csv
+[ML] Model saved          -> looped_analysis\ml_results\forex_eur_usd\5y\model.pkl
+[ML] Predictions saved    -> looped_analysis\ml_results\forex_eur_usd\5y\predictions.csv
+[ML] Importances saved    -> looped_analysis\ml_results\forex_eur_usd\5y\feature_importances.csv
+[ML] Summary saved        -> looped_analysis\ml_results\forex_eur_usd\5y\summary.txt
+[ML] Importance chart     -> looped_analysis\ml_results\forex_eur_usd\5y\feature_importances.png
+[ML] Model comparison (purged 5-fold CV on the training block):
+                 model  cv_accuracy_mean  val_accuracy  test_accuracy  test_p_value_vs_chance
+              logistic             0.936         0.953          0.950                   0.000
+         logistic_tanh             0.930         0.936          0.940                   0.000
+              mlp_tanh             0.929         0.936          0.953                   0.000
+hist_gradient_boosting             0.925         0.940          0.940                   0.000
+               xgboost             0.925         0.946          0.936                   0.000
+              lightgbm             0.923         0.953          0.933                   0.000
+           extra_trees             0.922         0.913          0.920                   0.000
+         random_forest             0.918         0.903          0.926                   0.000
+[ML] Contributions (tree-path contributions (Saabas, exact decomposition of the forest probability)) -> feature_contributions.png/csv; top: bullish_candle_pct, candle_direction_balance, drawdown_to_volatility
+[ML] HTML report          -> looped_analysis\summary_report.html
+
+[ML] Data split for 1992 rows (ordered blocks):
+  Training:   1394 rows (70.0%)
+  Validation: 299 rows (15.0%)
+  Test:       299 rows (15.0%)
+  Training fits the model; validation checks it during development.
+  This script reports validation accuracy but does not tune on validation data.
+  Test data stays held back for the final accuracy check.
+
+[ML] Done.
+

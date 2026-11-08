@@ -1,0 +1,2 @@
+asset_type,instrument,timeframe,oob_accuracy,train_accuracy,validation_accuracy,test_accuracy,train_rows,validation_rows,test_rows,label_mode,test_p_value_vs_chance,min_detectable_accuracy,tuned
+forex,eur/usd,5y,0.45714285714285713,1.0,0.42857142857142855,0.625,35,7,8,forecast,0.7265625,0.9949747468305832,0

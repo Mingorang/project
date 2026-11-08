@@ -1,0 +1,45 @@
+[ML] Historical stock comparison: all runs are outside available historical coverage; intraday yfinance data is limited to recent dates and future candles cannot be matched.
+[ML] History cleared; training on this run only.
+[ML] Pruned 7 outlier run(s) (> 150.0% from the median) -> pruned_runs.csv
+
+[ML][forex EUR/USD] Loaded 1993 rows from analysis_summary.csv
+[ML] Using 32 / 32 candidate features
+[ML][forex EUR/USD] Label: future_return_pct > 0 (last part of each run; features use only the earlier bars); sample weights uniform
+[ML][forex EUR/USD] Split (block):  train=1395  |  val=299  |  test=299
+[ML][forex EUR/USD] Class balance - bullish: 965 / 1993 (48.4%)  (expected about 50% on random data)
+[ML][forex EUR/USD] Training RandomForestClassifier (n_estimators=500, min_samples_leaf=13)...
+[ML][forex EUR/USD] OOB accuracy (train-set estimate): 0.5004
+[ML][forex EUR/USD] Train accuracy : 0.9183
+[ML][forex EUR/USD] Val   accuracy : 0.4983
+[ML][forex EUR/USD] Test  accuracy : 0.4348
+[ML] Note: expected test accuracy about 0.50 on synthetic random data.
+     Compare with real historical data for forex EUR/USD to assess market signal.
+[ML][forex EUR/USD] Accuracy metrics saved -> looped_analysis\ml_results\forex_eur_usd\5y\accuracy_metrics.csv
+[ML] Model saved          -> looped_analysis\ml_results\forex_eur_usd\5y\model.pkl
+[ML] Predictions saved    -> looped_analysis\ml_results\forex_eur_usd\5y\predictions.csv
+[ML] Importances saved    -> looped_analysis\ml_results\forex_eur_usd\5y\feature_importances.csv
+[ML] Summary saved        -> looped_analysis\ml_results\forex_eur_usd\5y\summary.txt
+[ML] Importance chart     -> looped_analysis\ml_results\forex_eur_usd\5y\feature_importances.png
+[ML] Model comparison (purged 5-fold CV on the training block):
+                 model  cv_accuracy_mean  val_accuracy  test_accuracy  test_p_value_vs_chance
+              logistic             0.520         0.555          0.488                   0.729
+         logistic_tanh             0.518         0.559          0.512                   0.729
+hist_gradient_boosting             0.508         0.532          0.545                   0.133
+           extra_trees             0.505         0.502          0.438                   0.037
+         random_forest             0.505         0.492          0.435                   0.028
+               xgboost             0.505         0.522          0.495                   0.908
+              lightgbm             0.501         0.515          0.495                   0.908
+              mlp_tanh             0.496         0.495          0.482                   0.563
+[ML] Contributions (tree-path contributions (Saabas, exact decomposition of the forest probability)) -> feature_contributions.png/csv; top: macd_histogram_abs, volume_abs_return_corr, volume_cv
+[ML] HTML report          -> looped_analysis\summary_report.html
+
+[ML] Data split for 1993 rows (ordered blocks):
+  Training:   1395 rows (70.0%)
+  Validation: 299 rows (15.0%)
+  Test:       299 rows (15.0%)
+  Training fits the model; validation checks it during development.
+  This script reports validation accuracy but does not tune on validation data.
+  Test data stays held back for the final accuracy check.
+
+[ML] Done.
+

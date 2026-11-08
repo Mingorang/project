@@ -1,0 +1,18 @@
+# Hugging Face path only - deliberately separate from requirements.txt so the core
+# simulator keeps no cloud dependency. Install with:
+#     python -m pip install -r requirements-hf.txt
+
+# Archive backend: prune_disk_space.py --backend hf, and loop_runner.py [loop] cloud_backend = "hf"
+huggingface_hub>=0.34
+
+# Dataset export / round-trip verification: load_dataset(repo_id) over the exported Parquet
+datasets>=3.0
+
+# Training backend "sklearn" (default)
+scikit-learn>=1.9
+
+# Training backend "transformers" only - uncomment when --backend transformers is used.
+# Left commented because torch is ~2 GB and no model in this project needs it today.
+# transformers>=4.44
+# accelerate>=0.34
+# torch>=2.4

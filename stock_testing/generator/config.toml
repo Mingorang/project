@@ -1,0 +1,241 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  config.toml - every tunable of the self-correcting simulator.
+#  Missing keys fall back to the defaults in project_config.DEFAULT_CONFIG.
+#  Every value is checked against its allowed range (project_config.SCHEMA) when a
+#  script starts: an out-of-range value stops the run with a list of what to fix.
+#  Unknown keys are reported (not silently ignored).
+# ─────────────────────────────────────────────────────────────────────────────
+
+[tutorial]
+mode = "off"            # off | beginner | advanced  (explains every prompt before it is asked)
+
+[storage]
+auto_create_folders = true          # create looped_results / looped_analysis when missing
+archive_after_run = false           # zip the per-run CSV/PNG files after the analysis
+archive_dir = ""                    # e.g. a OneDrive / Google Drive / Dropbox folder ("" = next to the scripts)
+delete_loose_after_archive = false  # remove the loose files once the zip is written
+keep_png = true                     # false = leave PNGs out of the archive
+
+[indicators]                        # ONE table for every chart, analysis, scan and ML feature:
+                                    # market_analysis.py, analyze_looped_results.R, live mode, routine/scan.py
+fast_sma = 4                        # fast simple moving average (candles): the crossover trigger line
+slow_sma = 14                       # slow SMA; also the t-interval window and the fewest candles a chart may have
+ci_level = 0.975                    # two-sided confidence of the t-interval around the slow-SMA mean (0.95 = 95 %)
+target_r = 2.5                      # crossover take-profit as a multiple of the initial risk (2.0 = 2R)
+bollinger_window = 20
+bollinger_sd = 2.0                  # band half-width in standard deviations
+rsi_period = 14
+rsi_overbought = 73.0
+rsi_oversold = 35.0
+macd_fast = 12
+macd_slow = 26
+macd_signal = 9                     # the signal line completes after macd_slow + macd_signal candles
+atr_period = 14
+# CSV column names keep their historical labels (fast_sma_5, slow_sma_12, ci95_*, rsi_14 ...) so stored
+# histories and the ML feature list stay compatible; the windows actually used are the values above and
+# are recorded per run in analysis_summary.csv (fast_window, slow_window, confidence_level).
+
+[session]                           # simulated trading session (price_modeling.py options 1 and 2)
+start_hour = 9                      # 24-hour market (FX, crypto): start_hour = 0 and minutes = 1440
+minutes = 540
+scale_period_change_to_daily = true # feed change / sqrt(trading days) to the vol formula (its native scale)
+backtest_point_in_time_change = true  # backtest cycles only see the market change from BEFORE they start
+max_candles_comfy = 100             # interval menus flag more candles than this as a crowded chart
+
+[volatility]                        # where every simulation's starting vol_index comes from (options 1 and 2)
+source = "realized"                 # realized | formula
+# realized: the real per-candle volatility of the window just BEFORE the simulated one, at the same
+#           candle size (vol_index = sigma / 0.2309). A backtest cycle never sees its own prices.
+# formula:  the original market-change sigmoid. It is lopsided (+1 % day -> vol 64.7, -1 % -> 0.18) and
+#           ignores the candle size, which is what made 15-minute backtests collapse to zero.
+daily_lookback = 20                 # fallback when the previous window has no real candles: this many daily
+                                    # closes before the window, scaled to one candle
+
+[limits]                            # hard bounds: prompts, CLI flags and learned values are checked against these
+vol_index_min = 0.001               # per-bar sigma ~0.0002 %; smaller is a flat line (1e-100 is rejected / raised)
+vol_index_max = 200.0               # per-bar sigma ~46 %; past ~249 one bar can wipe out the whole price
+start_price_min = 1e-6
+start_price_max = 1e9
+max_runs = 200000                   # "How many plots?"
+max_cycles = 500                    # backtest cycles (also limited by how far back Yahoo has data)
+max_loops = 50                      # self-correction learning loops
+
+[performance]                       # big runs: one chart takes ~2.4 s, so 1,000 runs with charts took ~50 min
+chart_workers = 0                   # processes that draw chart PNGs: 0 = all CPU cores but one, 1 = this process only
+parallel_min_charts = 24            # fewer charts than this are drawn here (starting the workers costs ~3 s)
+
+[live]                             # option 3 - current market data (real Yahoo Finance bars)
+periods = ["1d", "5d", "1m", "3m", "6m", "ytd", "1y", "2y", "5y", "10y", "max"]
+candles_min = 80                    # the candle size of every chart is chosen automatically so the
+candles_max = 140                   # candle count lands in [candles_min, candles_max] ...
+candles_target = 110                # ... as close to this as the data allows
+forward_runs_per_period = 9         # simulated future paths per period, vol calibrated on that period (0 = real only)
+real_weight = 3.0                   # ML sample weight of a real-market row; must be larger than ...
+sim_weight = 1.0                    # ... the weight of a simulated (predicted) row
+chart_simulated_runs = false        # true = source / analysis PNGs for the simulated runs as well
+context_symbols = ["S&P 500=^GSPC", "VIX=^VIX", "DXY=DX-Y.NYB"]   # extra snapshot rows ("Name=SYMBOL"), [] = none
+snapshot_years = 5                  # daily history behind the vol percentile and the 200-day average
+default_save_state = 1              # save state used when you press Enter (1-6, same menu as options 1 and 2)
+
+[scan]                              # routine/scan.py and the live snapshot: what counts as "worth reporting"
+vol_pctile_shift = 10               # percentile points
+big_move_sigma = 2.0                # today's move in units of its own 20-day sigma
+stale_bars = 4                      # business days without a new bar
+flat_run = 4                        # identical consecutive closes
+min_history_bars = 250              # fewer daily bars = download treated as failed
+
+[scoring]                           # backtest accuracy index (backtest_compare.py); the four weights sum to 1
+w_path = 0.40
+w_direction = 0.25
+w_net_move = 0.20
+w_range = 0.15
+path_tolerance = 0.5                # RMSE / net-move error equal to this share of the range scores -1
+min_coverage = 0.5                  # a cycle needs this share of its bars covered by real data to be scored
+min_bars_absolute = 8
+
+[pruning]                           # outlier run detection (ml_model.py)
+enabled = true
+pct_difference = 150.0              # prune a run when |x - median| / max(|median|, 1.4826*MAD) exceeds this many %
+min_rows_kept = 10                  # never prune below this many rows
+columns = ["realized_vol_per_bar_pct", "high_low_range_pct_of_low", "max_drawdown_pct_positive_prices_only"]
+
+[generator]
+wick_factor = 0.2333333333          # 3.5 / 15, the original wick model
+wick_bull = 1.0                     # wick multiplier for bullish candles
+wick_bear = 1.0                     # wick multiplier for bearish candles (real bears usually have longer wicks)
+jump_prob = 0.0                     # per-bar probability of a jump
+jump_size = 2.0                     # mean of the Exponential jump multiplier (multiplier = 1 + Exp)
+ar1 = 0.0                           # AR(1) coefficient on the bar change (negative = mean reversion)
+gap_prob = 0.0                      # probability that a bar opens away from the previous close
+gap_sigma_pct = 0.05                # size of those gaps (%)
+dist = "uniform"                    # uniform | skewnorm | empirical | gbm_quantile
+skew_alpha = 0.0                    # skew-normal shape (dist = "skewnorm")
+quantile_level = 0.5                # empirical quantile level (dist = "gbm_quantile")
+profile_enabled = true              # U-shaped intraday variance profile (intraday candles only)
+volume_enabled = true               # simulate a Volume column
+volume_base = 1000000.0
+volume_beta = 1.0                   # volume rises with |bar change| / typical |bar change|
+volume_noise = 0.35
+streak_enabled = true               # idea 1: probability of another same-direction bar decays with run length
+streak_decay_factor = 0.04          # decay = 1 - 0.04 * e
+streak_target_p10 = 0.032           # P(10 bars in the same direction); c1 and the decay interval are calibrated to it
+streak_max_c1 = 0.95
+
+[volatility_search]
+enabled = true
+method = "auto"                     # auto | step | bisect | grid | coarse_fine | cobyla | bayes | ga | mc
+criteria = ["path", "bars", "price"]    # stop when ALL hold: path bars price exact streak_ks kl acf drawdown info_ratio
+target = 0.30                       # VOL_TARGET: accuracy_index to reach ([PATH])
+step_abs = 0.05                     # VOL_STEP_ABS (step_mode = "abs")
+step_pct = 10.0                     # relative step in % of the current vol_index (step_mode = "pct")
+step_mode = "pct"                   # pct | abs
+max_iters = 40                      # MAX_VOL_ITERS
+min_step_pct = 0.25                 # stop when the (halved) step falls below this % of vol_index
+mc_paths = 6                        # simulated paths per cycle per evaluation (median is used)
+validation_paths = 12               # fresh-seed paths used for the reported (honest) numbers
+convergence_eps = 0.002             # |dF| below this for convergence_patience steps = converged
+convergence_patience = 3
+coarse_step_abs = 0.5               # iterative deepening: coarse grid step
+fine_step_abs = 0.05                # ... then fine grid step around the winner
+max_grid_points = 120
+range_lo_mult = 0.1                 # v_min = 0.1 * sigma_real
+range_hi_mult = 5.0                 # v_max = 5.0 * sigma_real
+w_path = 0.30                       # F = w_path*path + w_direction*direction + w_net*net + w_range*range
+w_direction = 0.15
+w_net = 0.20
+w_range = 0.35                      # variance anchor (see note in composite_F); 0 = pure three-term F
+bars_min = 0.55                     # [BARS]  direction match >= 55 %
+price_min = 0.98                    # [PRICE] net price match >= 0.98
+exact_pass = 0.30                   # [EXACT] weighted score threshold
+path_error_lo = 0.02                # optional band on normalised path error (prevents fitting the exact real path)
+path_error_hi = 0.60
+path_band = false
+ks_p_min = 0.05                     # streak-length KS test must not reject at this level
+kl_max = 0.50
+acf_ssd_max = 1.0
+info_ratio_max = 0.30
+drawdown_tolerance_pct = 5.0
+winrate_tolerance = 0.25
+body_range_tolerance = 0.15
+realised_vol_tolerance = 0.20       # flag runs whose realised vol differs from vol_index's expectation by > 20 %
+accuracy_decay_threshold = 0.10     # new accuracy_index worse than the stored one by this much -> re-run the search
+recal_days = 30                     # --auto-recal: stored optimum older than this -> recalibrate
+recal_iters = 5
+recal_every_runs = 100              # forward mode: recalibrate after this many new runs
+auto_recalibrate = false
+consensus_runs = 3                  # independent searches; the median vol is kept
+bootstrap_resamples = 200
+ci_level = 0.90
+sprt_enabled = true
+sprt_alpha = 0.05
+sprt_beta = 0.05
+tune_shape = true                   # GA over wick_factor, jump_prob, ar1, gap_prob, streak_c1 together with vol
+ga_population = 12
+ga_generations = 5
+bayes_init = 5
+bayes_evals = 20
+cobyla_maxiter = 40
+holdout_frac = 0.25                 # newest cycles held out of the calibration (out-of-sample check)
+global_cycle_cap = 30               # cycles used by the global search (evenly sampled) to keep it fast
+loops = 1                           # per-cycle learning loops; each loop refines the stored per-cycle vol
+n_aug = 0                           # extra high-quality runs at the optimal vol added to the ML data
+aug_weight = 2.0                    # sample weight boost for those runs
+ensemble_k = 1                      # > 1: K generators vote on direction; majority = ensemble label
+decay_lambda_grid = [0.0, 0.005, 0.01, 0.02, 0.05]   # vol(t) = vol0 * exp(-lambda * t) over cycles
+seed_range = 10000000
+per_cycle = true
+use_regimes = true
+use_history_seed = true
+use_transfer = true
+rolling_window = 10
+weak_segment_threshold = 0.40
+profile_learning = true
+
+[objective]                         # optional soft penalties subtracted from F (0 = off)
+kl = 0.0
+acf = 0.0
+drawdown = 0.0
+wick = 0.0
+body_range = 0.0
+winrate = 0.0
+info_ratio = 0.0
+streak_ks = 0.0
+
+[exact]                             # EXACT = alpha*path + beta*direction + gamma*net + delta*wick_ratio_match
+alpha = 0.40
+beta = 0.25
+gamma = 0.20
+delta = 0.15
+
+[ml]
+label_mode = "return"               # return | forecast | direction_match | ensemble
+                                    # "return" leaks (features and label share one finished path); "forecast" does not
+forecast_split = 0.70               # forecast mode: features from the first 70% of the bars, label from the last 30%
+cv_folds = 5
+embargo_pct = 0.02
+use_sample_weight = true            # weight runs by accuracy_index
+models = ["random_forest", "extra_trees", "logistic", "logistic_tanh", "mlp_tanh",
+          "hist_gradient_boosting", "xgboost", "lightgbm"]
+conformal_alpha = 0.10
+adversarial_auc_flag = 0.55
+online_add_trees = 100
+online_update = false
+tune_rf = false
+tuning_config = "rf_tuning.toml"
+train_frac = 0.70                   # ordered block split: train / validation / test (test = the rest)
+val_frac = 0.15
+nan_drop_pct = 0.80                 # drop a feature when more than this share of training rows is NaN
+n_estimators = 500                  # trees in the main random forest
+keep_history = "ask"                # ask | yes | no - accumulate rows across runs (live mode always starts clean)
+
+[daily_tip]
+enabled = false
+time = "08:30"
+channel = "print"                   # print | ntfy | smtp
+ntfy_topic = ""                     # pick a hard-to-guess topic, then subscribe in the free ntfy app
+ntfy_server = "https://ntfy.sh"
+smtp_host = ""
+smtp_port = 587
+smtp_user = ""
+smtp_to = ""
+smtp_password_env = "ML_TIP_SMTP_PASSWORD"   # the password is read from this environment variable, never stored here

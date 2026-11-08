@@ -1,0 +1,82 @@
+=== ML Pipeline Summary ===
+Analysis dir      : C:\Users\Admin\AppData\Local\Temp\claude\C--Users-Admin-Documents-ml-project-stock-testing-generator\855fb7e1-cde5-4d85-ac9d-b935c31df9bb\scratchpad\run50k
+Asset type        : forex
+Instrument        : eur/usd
+Timeframe         : 5d
+Runs              : 49808
+Features used     : 32
+Target            : total_return_pct > 0  (1 = bullish, 0 = bearish)
+
+Split (block — preserves RNG-correlation structure across runs)
+  Train  : rows 1 – 34865          (34865 rows, 70.0%)
+  Val    : rows 34866 – 42336  (7471 rows, 15.0%)
+  Test   : rows 42337 – 49808  (7472 rows, 15.0%)
+  Training fits the preprocessing and model parameters.
+  Validation is a held-out check; this script reports it but does not tune on it.
+  Test is held back for the final performance estimate, not model fitting.
+
+Accuracy
+  OOB (train, bootstrap estimate) : 0.5049
+  Train                           : 0.5976
+  Val                             : 0.4920
+  Test                            : 0.4933
+
+Confusion matrix (test set)  [row = true, col = predicted]
+                 Pred 0  Pred 1
+  True 0 (bear)    2079       1877
+  True 1 (bull)    1909       1607
+
+Interpretation
+  On synthetic random data test accuracy should converge to ~0.50.
+  Feature importances reflect spurious correlation in the null distribution.
+  Compare against real historical forex data for eur/usd to assess signal.
+
+Excluded (leakage) columns:
+  net_change_points
+  mean_valid_bar_return_pct
+  median_valid_bar_return_pct
+  mean_bar_change_points
+  median_bar_change_points
+  sharpe_per_bar_no_rf
+  sortino_per_bar_no_rf
+  bullish_candles
+  bearish_candles
+  best_long_r_multiple
+  best_short_r_multiple
+  obv_last
+  obv_slope_norm
+  vwap_dev_pct
+
+Feature importances (all features, ranked):
+   1. macd_histogram_last                           0.051482
+   2. realized_vol_per_bar_pct                      0.044949
+   3. bollinger_width_squared                       0.044733
+   4. volume_cv                                     0.044171
+   5. avg_candle_body_points                        0.043662
+   6. volume_abs_return_corr                        0.043284
+   7. atr_to_avg_range                              0.043072
+   8. macd_histogram_abs                            0.041874
+   9. bollinger_width_pct_last                      0.041749
+  10. rsi_distance_from_50                          0.041628
+  11. rsi14_last                                    0.041269
+  12. high_low_range_points                         0.041131
+  13. sd_bar_change_points                          0.040391
+  14. candle_body_to_range_ratio                    0.039975
+  15. avg_true_range_points                         0.039542
+  16. avg_candle_range_points                       0.039504
+  17. volatility_to_range_ratio                     0.038647
+  18. bollinger_position_distance                   0.037991
+  19. atr14_last                                    0.037624
+  20. bollinger_percent_b_last                      0.036684
+  21. max_drawdown_pct_positive_prices_only         0.036015
+  22. drawdown_to_volatility                        0.035906
+  23. crossover_win_rate                            0.020025
+  24. bullish_candle_pct                            0.017666
+  25. candle_direction_balance                      0.016594
+  26. winning_crossover_trades                      0.009604
+  27. valid_crossover_trades                        0.009381
+  28. crossover_direction_balance                   0.008083
+  29. sma_bull_crossovers_5_12                      0.005730
+  30. sma_bear_crossovers_5_12                      0.004553
+  31. macd_histogram_sign                           0.002806
+  32. rsi_overbought_flag                           0.000275
